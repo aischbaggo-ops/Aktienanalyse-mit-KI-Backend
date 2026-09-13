@@ -118,6 +118,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
     let scoreQualitaet = parsed.scoreQualitaet;
     let swot = parsed.swot;
     let noGoHart = parsed.noGoHart;
+    let fazit = parsed.fazit;
     let scoreTotal: number | null = null;
     if ([scoreFundamental, scoreQualitaet, scoreKrise, scoreTrend].every((x) => typeof x === "number")) {
       scoreTotal = Math.round(0.35 * scoreFundamental! + 0.25 * scoreQualitaet! + 0.20 * scoreKrise! + 0.20 * scoreTrend!);
@@ -188,12 +189,18 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
           : `Kontrolldurchlauf bestätigt mit Score ${scoreTotal2} eine deutliche Abweichung vom bisherigen Durchschnitt - möglicherweise eine reale Veränderung der Faktenlage statt reinen Bewertungsrauschens.`,
       );
 
-      allCriteria = [...allCriteria.filter((c) => c.dimension !== "Qualitaet"), ...parsed2.qualitaetKriterien];
-      warnings = [...warnings, ...notes];
+      // Nur ersetzen, wenn Opus tatsaechlich Kriterien geliefert hat - bei
+      // einem JSON-Parse-Fehler im Kontrolllauf waere qualitaetKriterien
+      // sonst leer und wuerde die guten Sonnet-Kriterien komplett loeschen.
+      allCriteria = parsed2.qualitaetKriterien.length > 0
+        ? [...allCriteria.filter((c) => c.dimension !== "Qualitaet"), ...parsed2.qualitaetKriterien]
+        : allCriteria;
+      warnings = [...warnings, ...(parsed2.warnings ?? []), ...notes];
       scoreQualitaet = scoreQualitaet2;
       scoreTotal = scoreTotal2;
       swot = parsed2.swot;
       noGoHart = parsed2.noGoHart;
+      fazit = parsed2.fazit ?? fazit;
       tokensInput += parsed2.tokensInput;
       tokensOutput += parsed2.tokensOutput;
       costUsd += parsed2.costUsd;
@@ -213,7 +220,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
       score_stabilitaet: stability.score,
       criteria: allCriteria,
       warnings,
-      fazit: parsed.fazit,
+      fazit,
       bewertung: { dcf: scoreData.dcf, valuation },
       prognose: prognose,
       chart_data: {
