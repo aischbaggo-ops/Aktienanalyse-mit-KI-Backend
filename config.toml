@@ -1,0 +1,24 @@
+project_id = "lthzvefqwhyiynescyhq"
+
+# Wird nur relevant, falls doch mal lokal mit "supabase start" / "functions
+# serve" getestet wird (aktuell bewusst nicht genutzt, siehe README.md) - ohne
+# diese Einstellung wuerde der lokale Edge-Runtime-Worker nach jeder Response
+# sofort beendet, bevor EdgeRuntime.waitUntil() den Hintergrund-Task
+# abschliessen kann. Fuer den echten Deploy gegen das Supabase-Projekt ist das
+# ohne Wirkung - dort verifiziert Pruefpunkt 1 im README das reale Verhalten.
+[edge_runtime]
+policy = "per_worker"
+
+# Beide Endpunkte muessen wie die bisherigen n8n/ngrok-Webhooks ohne Supabase-
+# Auth-Header aufrufbar bleiben (Frontend sendet aktuell keinen JWT mit, siehe
+# lib/webhooks.ts) - siehe Pruefpunkt 2 im Uebergabe-Dokument. WICHTIG: laut
+# mehreren offenen supabase/cli-Issues wird diese Einstellung teils bei
+# "functions deploy" nicht zuverlaessig uebernommen - nach jedem Deploy im
+# Supabase Dashboard unter Edge Functions -> <function> -> Settings pruefen,
+# dass "Enforce JWT Verification" tatsaechlich AUS ist, nicht nur hier im
+# config.toml vertrauen.
+[functions.analyse]
+verify_jwt = false
+
+[functions.symbol-search]
+verify_jwt = false

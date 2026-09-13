@@ -1,0 +1,325 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { corsHeaders } from "../_shared/cors.ts";
+import { computeScores, computeStabilityScore, computePrognose, computeValuation, computeAnalystConsensus, computeBankRatings, ampelLabel, arr, first } from "../_shared/scoring.ts";
+import { buildUserPrompt, callClaude, parseClaudeResponse, PRICING, QUAL_WEIGHTS } from "../_shared/claude.ts";
+
+const FMP_API_KEY = Deno.env.get("FMP_API_KEY")!;
+const FMP_BASE = "https://financialmodelingprep.com/stable";
+const supabase = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+);
+
+async function fmpGet(path: string) {
+  try {
+    const url = FMP_BASE + path + (path.includes("?") ? "&" : "?") + "apikey=" + FMP_API_KEY;
+    const res = await fetch(url);
+    const data = await res.json();
+    return { ok: res.ok, data };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+async function fetchFmpData(ticker: string) {
+  const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades] = await Promise.all([
+    fmpGet(`/profile?symbol=${ticker}`),
+    fmpGet(`/stock-peers?symbol=${ticker}`),
+    fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`),
+    fmpGet(`/balance-sheet-statement?symbol=${ticker}&period=annual&limit=5`),
+    fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`),
+    fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`),
+    fmpGet(`/discounted-cash-flow?symbol=${ticker}`),
+    fmpGet(`/news/stock?symbols=${ticker}&limit=20`),
+    fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`),
+    fmpGet(`/historical-price-eod/full?symbol=%5EGSPC&from=2000-01-01`),
+    fmpGet(`/financial-scores?symbol=${ticker}`),
+    fmpGet(`/price-target-summary?symbol=${ticker}`),
+    fmpGet(`/grades?symbol=${ticker}`),
+  ]);
+  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades };
+}
+
+// ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
+async function runAnalysis(ticker: string, logId: string, startedAt: number) {
+  // Log-Marker fuer Pruefpunkt 3 ("Logs nach dem ersten Testlauf ansehen"):
+  // Wenn diese Zeile in Supabase -> Edge Functions -> Logs auftaucht, NACHDEM
+  // der Response laengst beim Client angekommen ist, laeuft waitUntil() wie
+  // erwartet im Hintergrund weiter.
+  console.log(`[analyse] background run started ticker=${ticker} logId=${logId}`);
+
+  try {
+    const fmpData = await fetchFmpData(ticker);
+    const scoreData = computeScores(fmpData);
+
+    const stability = computeStabilityScore(
+      fmpData.scores,
+      scoreData.debtRatioAmpel,
+      scoreData.dynVerschuldungAmpel,
+      scoreData.fcfTrendAmpel,
+    );
+
+    const incomeRowsForShares = arr(fmpData.income).slice().sort((a: any, b: any) => +new Date(a.date) - +new Date(b.date));
+    const lastKnownShares = incomeRowsForShares.length
+      ? incomeRowsForShares[incomeRowsForShares.length - 1].weightedAverageShsOutDil ?? null
+      : null;
+    const sharesOutForPrognose = scoreData.profile?.sharesOutstanding ?? lastKnownShares ?? null;
+
+    const prognose = computePrognose(
+      fmpData,
+      scoreData.profile?.price ?? null,
+      sharesOutForPrognose,
+    );
+
+    const valuation = computeValuation(scoreData.fundamentalSeries, scoreData.profile?.price ?? null);
+    const analystConsensus = computeAnalystConsensus(fmpData.priceTargetSummary);
+    const bankRatings = computeBankRatings(fmpData.grades);
+
+    // ---------- QUICK-CHECK-VORFILTER ----------
+    // Schwellenwerte (Penny-Stock < $5, Liquiditaet < 200k Stueck/Tag,
+    // Marktkap-Grenzen) sind eigene, grobe Standard-Setzungen - keine FMP- oder
+    // regulatorische Vorgabe, bei Bedarf anpassen.
+    const currentPriceForCheck = scoreData.profile?.price ?? null;
+    const marketCapForCheck = valuation.verfuegbar ? valuation.market_cap : null;
+    const quickCheck = {
+      kein_penny_stock: {
+        pass: currentPriceForCheck != null ? currentPriceForCheck >= 5 : null,
+        wert: currentPriceForCheck,
+      },
+      liquiditaet: {
+        pass: scoreData.avgVolume != null ? scoreData.avgVolume >= 200_000 : null,
+        wert: scoreData.avgVolume,
+      },
+      marktkap_klasse: marketCapForCheck != null
+        ? {
+          pass: true,
+          klasse: marketCapForCheck >= 10_000_000_000 ? "Large Cap" : marketCapForCheck >= 2_000_000_000 ? "Mid Cap" : "Small Cap",
+          wert: marketCapForCheck,
+        }
+        : { pass: null, klasse: null, wert: null },
+      aufwaertstrend: {
+        pass: scoreData.trend.wCagrStock != null ? scoreData.trend.wCagrStock > 0 : null,
+        wert: scoreData.trend.wCagrStock,
+      },
+    };
+
+    const userPrompt = buildUserPrompt(scoreData);
+    const claudeRaw = await callClaude("claude-sonnet-5", userPrompt);
+    const parsed = parseClaudeResponse(claudeRaw);
+
+    const scoreFundamental = scoreData.fundamental.score;
+    const scoreKrise = scoreData.krise.score;
+    const scoreTrend = scoreData.trend.score;
+    let scoreQualitaet = parsed.scoreQualitaet;
+    let swot = parsed.swot;
+    let noGoHart = parsed.noGoHart;
+    let scoreTotal: number | null = null;
+    if ([scoreFundamental, scoreQualitaet, scoreKrise, scoreTrend].every((x) => typeof x === "number")) {
+      scoreTotal = Math.round(0.35 * scoreFundamental! + 0.25 * scoreQualitaet! + 0.20 * scoreKrise! + 0.20 * scoreTrend!);
+    }
+
+    let allCriteria = [
+      ...scoreData.fundamental.kriterien.map((k: any) => ({ dimension: "Fundamental", ...k })),
+      ...parsed.qualitaetKriterien,
+      ...scoreData.trend.kriterien.map((k: any) => ({
+        dimension: "Trend", name: k.name, ampel: ampelLabel(k.a),
+        begruendung: k.a === null
+          ? "Kennzahl nicht berechenbar (fehlende Datengrundlage)."
+          : "Kennzahl: " + (k.wert?.toFixed ? k.wert.toFixed(3) : k.wert ?? "n/a"),
+      })),
+    ];
+    let warnings = [...scoreData.warningsNumerisch, ...parsed.warnings];
+    let tokensInput = parsed.tokensInput, tokensOutput = parsed.tokensOutput, costUsd = parsed.costUsd;
+
+    const ipoDate = scoreData.profile?.ipoDate;
+    if (ipoDate) {
+      const ageYears = (Date.now() - new Date(ipoDate).getTime()) / (365.25 * 24 * 3600 * 1000);
+      if (ageYears < 2) {
+        warnings.push("Kurshistorie unter 2 Jahren - Aktie hat noch keine echte Krise durchlaufen, Belastbarkeit der Bewertung entsprechend vorsichtig einordnen.");
+      } else if (ageYears < 5) {
+        warnings.push("Kurshistorie unter 5 Jahren - Krisenstabilität und Trend eingeschränkt belastbar.");
+      }
+    }
+
+    const dataSource = (scoreData.dataAvailability.priceStock < 500 || scoreData.dataAvailability.estimates === 0)
+      ? "fmp_free_limited" : "fmp_full";
+
+    // ---------- Plausibilitaetspruefung ----------
+    const cutoff = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: historyRows } = await supabase
+      .from("request_log")
+      .select("score_total, requested_at")
+      .eq("ticker", ticker)
+      .eq("status", "done")
+      .gte("requested_at", cutoff)
+      .order("requested_at", { ascending: false })
+      .limit(10);
+
+    const history = (historyRows || []).filter((r: any) => typeof r.score_total === "number");
+    const historyN = history.length;
+    const historyAvg = historyN > 0 ? history.reduce((s: number, r: any) => s + r.score_total, 0) / historyN : null;
+    const deviation = historyAvg !== null && typeof scoreTotal === "number" ? scoreTotal - historyAvg : null;
+    const needsCheck = historyN >= 2 && deviation !== null && Math.abs(deviation) > 3;
+
+    if (needsCheck) {
+      console.log(`[analyse] deviation check triggered ticker=${ticker} deviation=${deviation?.toFixed(1)} historyAvg=${historyAvg?.toFixed(1)} historyN=${historyN}`);
+      const claudeRaw2 = await callClaude("claude-opus-5", userPrompt);
+      const parsed2 = parseClaudeResponse(claudeRaw2);
+      const scoreQualitaet2 = parsed2.scoreQualitaet ?? scoreQualitaet;
+      let scoreTotal2 = scoreTotal;
+      if ([scoreFundamental, scoreQualitaet2, scoreKrise, scoreTrend].every((x) => typeof x === "number")) {
+        scoreTotal2 = Math.round(0.35 * scoreFundamental! + 0.25 * scoreQualitaet2! + 0.20 * scoreKrise! + 0.20 * scoreTrend!);
+      }
+      const avgRounded = Math.round(historyAvg! * 10) / 10;
+      const dev1Rounded = Math.round(deviation! * 10) / 10;
+      const dev2 = typeof scoreTotal2 === "number" ? Math.round((scoreTotal2 - historyAvg!) * 10) / 10 : null;
+
+      const notes = [
+        `Score weicht vom Durchschnitt der letzten ${historyN} Durchläufe (Ø ${avgRounded}, 4 Wochen) um ${dev1Rounded} Punkte ab. Automatischer Kontrolldurchlauf wurde durchgeführt.`,
+      ];
+      notes.push(
+        dev2 !== null && Math.abs(dev2) <= 3
+          ? `Kontrolldurchlauf lag mit Score ${scoreTotal2} wieder im erwarteten Bereich - ursprüngliche Abweichung wird als normale Bewertungsschwankung eingeordnet.`
+          : `Kontrolldurchlauf bestätigt mit Score ${scoreTotal2} eine deutliche Abweichung vom bisherigen Durchschnitt - möglicherweise eine reale Veränderung der Faktenlage statt reinen Bewertungsrauschens.`,
+      );
+
+      allCriteria = [...allCriteria.filter((c) => c.dimension !== "Qualitaet"), ...parsed2.qualitaetKriterien];
+      warnings = [...warnings, ...notes];
+      scoreQualitaet = scoreQualitaet2;
+      scoreTotal = scoreTotal2;
+      swot = parsed2.swot;
+      noGoHart = parsed2.noGoHart;
+      tokensInput += parsed2.tokensInput;
+      tokensOutput += parsed2.tokensOutput;
+      costUsd += parsed2.costUsd;
+    }
+
+    const result = {
+      status: "done",
+      company_name: scoreData.profile?.companyName ?? null,
+      sector: scoreData.profile?.sector ?? null,
+      currency: scoreData.profile?.currency ?? null,
+      current_price: scoreData.profile?.price ?? null,
+      score_total: scoreTotal,
+      score_fundamental: scoreFundamental !== null ? Math.round(scoreFundamental) : null,
+      score_qualitaet: scoreQualitaet !== null ? Math.round(scoreQualitaet) : null,
+      score_krise: scoreKrise !== null ? Math.round(scoreKrise) : null,
+      score_trend: scoreTrend !== null ? Math.round(scoreTrend) : null,
+      score_stabilitaet: stability.score,
+      criteria: allCriteria,
+      warnings,
+      fazit: parsed.fazit,
+      bewertung: { dcf: scoreData.dcf, valuation },
+      prognose: prognose,
+      chart_data: {
+        krise: scoreData.krise.crisisDetail,
+        trend: { wCagrStock: scoreData.trend.wCagrStock, wCagrIndex: scoreData.trend.wCagrIndex, wVola: scoreData.trend.wVola },
+        stabilitaet: stability.detail,
+        swot,
+        no_go_hart: noGoHart,
+        fundamentalSeries: scoreData.fundamentalSeries,
+        priceMonthly: scoreData.priceMonthly,
+        relativeStrength: scoreData.relativeStrength,
+        returnBars: scoreData.returnBars,
+        quickCheck,
+        analystConsensus,
+        bankRatings,
+      },
+      data_source: dataSource,
+      error_message: parsed.parseError,
+      tokens_input: tokensInput,
+      tokens_output: tokensOutput,
+      cost_usd_claude: Math.round(costUsd * 1_000_000) / 1_000_000,
+    };
+
+    await supabase.from("stock_analyses").update(result).eq("ticker", ticker);
+
+    await supabase.from("request_log").update({
+      status: result.error_message ? "error" : "done",
+      duration_ms: Date.now() - startedAt,
+      error_message: result.error_message,
+      data_quality: dataSource === "fmp_full" ? "full" : "limited",
+      score_total: result.score_total,
+      score_fundamental: result.score_fundamental,
+      score_qualitaet: result.score_qualitaet,
+      score_krise: result.score_krise,
+      score_trend: result.score_trend,
+      score_stabilitaet: result.score_stabilitaet,
+      deviation_triggered: needsCheck,
+      deviation_amount: deviation !== null ? Math.round(deviation * 10) / 10 : null,
+    }).eq("id", logId);
+
+    console.log(`[analyse] background run finished ticker=${ticker} logId=${logId} status=${result.status} durationMs=${Date.now() - startedAt}`);
+  } catch (e) {
+    console.error(`[analyse] background run FAILED ticker=${ticker} logId=${logId}:`, e);
+    await supabase.from("stock_analyses").update({ status: "error", error_message: (e as Error).message }).eq("ticker", ticker);
+    await supabase.from("request_log").update({
+      status: "error", duration_ms: Date.now() - startedAt, error_message: (e as Error).message,
+    }).eq("id", logId);
+  }
+}
+
+// ---------- HTTP-Handler ----------
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+  if (req.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers: corsHeaders });
+  }
+
+  const body = await req.json().catch(() => ({}));
+  const ticker = (body.ticker || "").toString().trim().toUpperCase();
+  const user_id = body.user_id || null;
+  const max_age_days = body.max_age_days ?? 7;
+  const force_refresh = body.force_refresh === true;
+
+  if (!ticker) {
+    return new Response(JSON.stringify({ error: "ticker fehlt im Request-Body" }), { status: 400, headers: corsHeaders });
+  }
+
+  const { data: existingRows } = await supabase.from("stock_analyses").select("*").eq("ticker", ticker).limit(1);
+  const existing = existingRows?.[0] ?? null;
+
+  let isFresh = false;
+  if (existing && existing.status === "done" && !force_refresh) {
+    const ageMs = Date.now() - new Date(existing.updated_at).getTime();
+    isFresh = ageMs <= max_age_days * 24 * 60 * 60 * 1000;
+  }
+
+  if (isFresh) {
+    await supabase.from("request_log").insert({ ticker, user_id, source: "cache", max_age_days, force_refresh });
+    if (user_id) {
+      await supabase.from("watchlists").upsert(
+        { user_id, ticker, analysis_id: existing.id },
+        { onConflict: "user_id,ticker" },
+      );
+    }
+    return new Response(JSON.stringify({ source: "cache", ticker, analysis: existing }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  // Status auf running setzen (legt Zeile an, falls sie noch nicht existiert)
+  if (existing) {
+    await supabase.from("stock_analyses").update({ status: "running" }).eq("ticker", ticker);
+  } else {
+    await supabase.from("stock_analyses").insert({ ticker, status: "running" });
+  }
+
+  const { data: logRow } = await supabase.from("request_log").insert({
+    ticker, user_id, source: "processing", max_age_days, force_refresh,
+  }).select().single();
+
+  const startedAt = Date.now();
+
+  // Log-Marker fuer Pruefpunkt 3: diese Zeile erscheint VOR dem Response.
+  console.log(`[analyse] responding immediately, handing off to background ticker=${ticker} logId=${logRow?.id}`);
+
+  // Sofort antworten, danach im Hintergrund weiterlaufen (Supabase-eigenes
+  // Aequivalent zum n8n "fire and continue"-Muster).
+  // @ts-ignore: EdgeRuntime ist eine Supabase-spezifische globale API
+  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt));
+
+  return new Response(JSON.stringify({ source: "processing", ticker, status: "running" }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+});
