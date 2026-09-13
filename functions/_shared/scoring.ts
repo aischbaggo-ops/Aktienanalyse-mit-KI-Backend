@@ -323,6 +323,10 @@ export function computeScores(d: any) {
 
   const fundamentalSeries = {
     years: incomeRaw.map((r: any) => (r.date || "").slice(0, 4)),
+    // Volles Bilanzstichtags-Datum (nicht nur Jahr) - wird fuer den
+    // historischen KGV/KCV-Fair-Value-Vergleich gebraucht, um den Kurs zum
+    // jeweiligen Stichtag aus der Monats-Preisreihe nachzuschlagen.
+    datesFull: incomeRaw.map((r: any) => r.date || ""),
     revenue,
     grossProfit: series(incomeRaw, "grossProfit"),
     ebit: series(incomeRaw, "operatingIncome"), // EBIT-Naeherung, bereits verifiziertes Feld
@@ -459,10 +463,10 @@ export function computeStabilityScore(
   };
 }
 
-// ---------- BEWERTUNGSKENNZAHLEN (KGV / KCV / EV-Umsatz) ----------
-// Schwellenwerte fuer "guenstig/fair/eher teuer" sind eine grobe, branchen-
-// unabhaengige Einordnung (eigene Setzung, keine FMP- oder Analysten-Vorgabe) -
-// bei Bedarf anpassen/verfeinern.
+// ---------- BEWERTUNGSKENNZAHLEN (Fair Value KGV/KCV+DCF / EV-Umsatz) ----------
+// EV-Umsatz bleibt eine grobe, branchenunabhaengige Einordnung gegen absolute
+// Schwellen (eigene Setzung, keine FMP- oder Analysten-Vorgabe) - die
+// Legrand-Methodik (Abschnitt 8) deckt EV-Umsatz nicht ab, daher unveraendert.
 function lastValid(values: (number | null)[]): number | null {
   for (let i = values.length - 1; i >= 0; i--) {
     if (typeof values[i] === "number") return values[i] as number;
@@ -477,10 +481,120 @@ function classifyValuation(value: number | null, guenstigUnter: number, teuerUeb
   if (value > teuerUeber) return { value: Math.round(value * 10) / 10, label: "eher teuer" };
   return { value: Math.round(value * 10) / 10, label: "fair" };
 }
-export function computeValuation(fundamentalSeries: any, currentPrice: number | null): any {
-  const netIncome = lastValid(fundamentalSeries.netIncome);
+
+// Variationskoeffizient (Standardabweichung/Mittelwert) - derselbe
+// Stetigkeits-Massstab wie in stabilityOrRisingAmpel() weiter oben, hier
+// wiederverwendet, um KGV- vs. KCV-Weg gegeneinander zu gewichten.
+function coefficientOfVariation(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  if (mean === 0) return null;
+  const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance) / Math.abs(mean);
+}
+
+// Fair Value nach Legrand-Methodik Abschnitt 8: durchschnittliches
+// historisches Multiple (KGV, KCV) mal aktuellem Gewinn/Cashflow je Aktie,
+// dazu DCF als "zweites Standbein" (hier: 50/50-Gewichtung - die Methodik-
+// Doc gibt kein exaktes Gewicht vor, "Standbein" liest sich als gleichrangig).
+// Reprasentativer Zeitraum: dieselben Jahre wie fundamentalSeries (aktuell
+// 5) - kein zusaetzlicher FMP-Abruf noetig, konsistent mit den uebrigen
+// Fundamental-Tab-Charts. KCV nutzt operativen Cashflow (nicht FCF), passend
+// zur Methodik-Doc-Definition (Abschnitt 9: "Kurs / operativer CF pro
+// Aktie") - andere FCF-Verwendungen im Projekt (Cashflow-Chart etc.)
+// bleiben unangetastet.
+function computeFairValue(fundamentalSeries: any, stockMonthly: { date: string; close: number }[], currentPrice: number, dcfValue: number | null) {
+  const monthClose = new Map(stockMonthly.map((m) => [m.date.slice(0, 7), m.close]));
+  const n = fundamentalSeries.years.length;
+
+  const kgvSeries: number[] = [];
+  const kcvSeries: number[] = [];
+  let latestEps: number | null = null;
+  let latestOcfPerShare: number | null = null;
+
+  for (let i = 0; i < n; i++) {
+    const date = fundamentalSeries.datesFull?.[i];
+    const price = date ? monthClose.get(String(date).slice(0, 7)) : undefined;
+    const netIncome = fundamentalSeries.netIncome[i];
+    const ocf = fundamentalSeries.operatingCashFlow[i];
+    const shares = fundamentalSeries.sharesOut[i];
+
+    const eps = typeof netIncome === "number" && typeof shares === "number" && shares !== 0 ? netIncome / shares : null;
+    const ocfPerShare = typeof ocf === "number" && typeof shares === "number" && shares !== 0 ? ocf / shares : null;
+
+    if (eps !== null && eps > 0) latestEps = eps; // spaeteste (letzte) gueltige Zeile gewinnt
+    if (ocfPerShare !== null && ocfPerShare > 0) latestOcfPerShare = ocfPerShare;
+
+    if (typeof price === "number" && eps !== null && eps > 0) kgvSeries.push(price / eps);
+    if (typeof price === "number" && ocfPerShare !== null && ocfPerShare > 0) kcvSeries.push(price / ocfPerShare);
+  }
+
+  const avgKgv = kgvSeries.length ? kgvSeries.reduce((a, b) => a + b, 0) / kgvSeries.length : null;
+  const avgKcv = kcvSeries.length ? kcvSeries.reduce((a, b) => a + b, 0) / kcvSeries.length : null;
+
+  const fairValueKgvWeg = avgKgv !== null && latestEps !== null ? avgKgv * latestEps : null;
+  const fairValueKcvWeg = avgKcv !== null && latestOcfPerShare !== null ? avgKcv * latestOcfPerShare : null;
+
+  let multiplesFairValue: number | null = null;
+  if (fairValueKgvWeg !== null && fairValueKcvWeg !== null) {
+    const cvKgv = coefficientOfVariation(kgvSeries);
+    const cvKcv = coefficientOfVariation(kcvSeries);
+    if (cvKgv !== null && cvKcv !== null && cvKgv > 0 && cvKcv > 0) {
+      // Inverse-CV-Gewichtung: die stetigere (ruhigere) Kennzahl bekommt
+      // mehr Gewicht, aber keine wird komplett verworfen.
+      const wKgv = (1 / cvKgv) / (1 / cvKgv + 1 / cvKcv);
+      multiplesFairValue = wKgv * fairValueKgvWeg + (1 - wKgv) * fairValueKcvWeg;
+    } else if (cvKgv === 0 && cvKcv !== 0) {
+      multiplesFairValue = fairValueKgvWeg; // KGV perfekt stetig -> voll bevorzugt
+    } else if (cvKcv === 0 && cvKgv !== 0) {
+      multiplesFairValue = fairValueKcvWeg; // KCV perfekt stetig -> voll bevorzugt
+    } else {
+      multiplesFairValue = (fairValueKgvWeg + fairValueKcvWeg) / 2; // CV nicht bestimmbar (z.B. <2 Punkte) -> 50/50
+    }
+  } else {
+    multiplesFairValue = fairValueKgvWeg ?? fairValueKcvWeg;
+  }
+
+  // DCF-Gewicht 30% statt gleichrangig 50%: die Methodik-Doc nennt DCF nur
+  // als "Substanzanker" neben KGV/KCV, nicht als gleichrangigen Faktor -
+  // bei 50% dominierte DCF sonst zu stark und erzeugte bei stabilen
+  // Qualitaetswerten unplausible "stark ueberbewertet"-Ergebnisse.
+  const fairValue = multiplesFairValue !== null && dcfValue !== null
+    ? 0.7 * multiplesFairValue + 0.3 * dcfValue
+    : multiplesFairValue ?? dcfValue;
+
+  if (fairValue === null || !isFinite(fairValue) || fairValue <= 0) {
+    return {
+      value: null,
+      label: "keine Bewertung möglich",
+      abweichung_pct: null,
+      kontext: { avg_kgv: avgKgv, avg_kcv: avgKcv, dcf: dcfValue, jahre: n },
+    };
+  }
+
+  const abweichung = currentPrice / fairValue - 1;
+  const label = Math.abs(abweichung) <= 0.05 ? "fair bewertet" : abweichung > 0 ? "eher teuer" : "günstig";
+
+  return {
+    value: Math.round(fairValue * 100) / 100,
+    label,
+    abweichung_pct: Math.round(abweichung * 1000) / 1000,
+    kontext: {
+      avg_kgv: avgKgv !== null ? Math.round(avgKgv * 100) / 100 : null,
+      avg_kcv: avgKcv !== null ? Math.round(avgKcv * 100) / 100 : null,
+      dcf: dcfValue !== null ? Math.round(dcfValue * 100) / 100 : null,
+      jahre: n,
+    },
+  };
+}
+
+export function computeValuation(
+  fundamentalSeries: any,
+  stockMonthly: { date: string; close: number }[],
+  currentPrice: number | null,
+  dcfValue: number | null,
+): any {
   const revenue = lastValid(fundamentalSeries.revenue);
-  const freeCashFlow = lastValid(fundamentalSeries.freeCashFlow);
   const sharesOut = lastValid(fundamentalSeries.sharesOut);
   const totalDebt = lastValid(fundamentalSeries.totalDebt);
   const cash = lastValid(fundamentalSeries.cash);
@@ -492,21 +606,15 @@ export function computeValuation(fundamentalSeries: any, currentPrice: number | 
   const marketCap = currentPrice * sharesOut;
   const netDebt = (totalDebt ?? 0) - (cash ?? 0);
   const ev = marketCap + netDebt;
-
-  const eps = netIncome !== null ? netIncome / sharesOut : null;
-  const kgvRaw = eps !== null && eps !== 0 ? currentPrice / eps : null;
-  const fcfPerShare = freeCashFlow !== null ? freeCashFlow / sharesOut : null;
-  const kcvRaw = fcfPerShare !== null && fcfPerShare !== 0 ? currentPrice / fcfPerShare : null;
   const evUmsatzRaw = revenue !== null && revenue !== 0 ? ev / revenue : null;
 
   return {
     verfuegbar: true,
     market_cap: Math.round(marketCap * 100) / 100,
     ev: Math.round(ev * 100) / 100,
-    kgv: classifyValuation(kgvRaw, 15, 30),
-    kcv: classifyValuation(kcvRaw, 12, 25),
+    fair_value: computeFairValue(fundamentalSeries, stockMonthly, currentPrice, dcfValue),
     ev_umsatz: classifyValuation(evUmsatzRaw, 2, 6),
-    hinweis: "Einordnung (guenstig/fair/eher teuer) ist eine grobe, branchenunabhaengige Standard-Setzung, keine Analysten-Bewertung.",
+    hinweis: "EV-Umsatz-Einordnung ist eine grobe, branchenunabhaengige Standard-Setzung, keine Analysten-Bewertung. Fair Value basiert auf durchschnittlichem historischem KGV/KCV (5 Jahre, 70%) plus DCF als Substanzanker (30%), Toleranzband ±5% fuer \"fair bewertet\" (Legrand-Methodik Abschnitt 8).",
   };
 }
 

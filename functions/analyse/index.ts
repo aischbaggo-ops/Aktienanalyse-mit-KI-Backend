@@ -71,7 +71,12 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
       sharesOutForPrognose,
     );
 
-    const valuation = computeValuation(scoreData.fundamentalSeries, scoreData.profile?.price ?? null);
+    const valuation = computeValuation(
+      scoreData.fundamentalSeries,
+      scoreData.priceMonthly.stock,
+      scoreData.profile?.price ?? null,
+      scoreData.dcf?.dcf ?? null,
+    );
     const analystConsensus = computeAnalystConsensus(fmpData.priceTargetSummary);
     const bankRatings = computeBankRatings(fmpData.grades);
 
