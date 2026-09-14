@@ -19,13 +19,19 @@ function mapResults(data: unknown): SearchResult[] {
   }));
 }
 
-async function fmpSearch(endpoint: string, query: string): Promise<SearchResult[]> {
+interface FmpSearchOutcome {
+  results: SearchResult[];
+  rateLimited: boolean;
+}
+
+async function fmpSearch(endpoint: string, query: string): Promise<FmpSearchOutcome> {
   try {
     const res = await fetch(`${FMP_BASE}/${endpoint}?query=${encodeURIComponent(query)}&apikey=${FMP_API_KEY}`);
-    if (!res.ok) return [];
-    return mapResults(await res.json());
+    if (res.status === 429) return { results: [], rateLimited: true };
+    if (!res.ok) return { results: [], rateLimited: false };
+    return { results: mapResults(await res.json()), rateLimited: false };
   } catch {
-    return [];
+    return { results: [], rateLimited: false };
   }
 }
 
@@ -38,7 +44,7 @@ Deno.serve(async (req) => {
   const query = (url.searchParams.get("q") || "").trim();
 
   if (!query) {
-    return new Response(JSON.stringify({ results: [] }), {
+    return new Response(JSON.stringify({ results: [], rate_limited: false }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
@@ -55,13 +61,17 @@ Deno.serve(async (req) => {
 
   const seen = new Set<string>();
   const results: SearchResult[] = [];
-  for (const r of [...tickerMatches, ...nameMatches]) {
+  for (const r of [...tickerMatches.results, ...nameMatches.results]) {
     if (!r.symbol || seen.has(r.symbol)) continue;
     seen.add(r.symbol);
     results.push(r);
   }
 
-  return new Response(JSON.stringify({ results: results.slice(0, 15) }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({
+      results: results.slice(0, 15),
+      rate_limited: tickerMatches.rateLimited || nameMatches.rateLimited,
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
 });
