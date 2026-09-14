@@ -236,6 +236,16 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
         quickCheck,
         analystConsensus,
         bankRatings,
+        // Fuer den Analysten-Memo-Kopfbereich: alles bereits im selben
+        // /profile-Aufruf enthalten, kein zusaetzlicher FMP-Call noetig.
+        // defaultImage=true heisst FMP liefert nur ein generisches
+        // Platzhalterbild, kein echtes Firmenlogo - dann image weglassen.
+        profileMeta: {
+          image: scoreData.profile?.defaultImage === true ? null : scoreData.profile?.image ?? null,
+          marketCap: scoreData.profile?.marketCap ?? null,
+          exchange: scoreData.profile?.exchange ?? null,
+          industry: scoreData.profile?.industry ?? null,
+        },
       },
       data_source: dataSource,
       error_message: parsed.parseError,
