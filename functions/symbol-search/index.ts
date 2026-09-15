@@ -1,7 +1,12 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 
 const FMP_API_KEY = Deno.env.get("FMP_API_KEY")!;
 const FMP_BASE = "https://financialmodelingprep.com/stable";
+const supabase = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+);
 
 interface SearchResult {
   symbol: string;
@@ -67,10 +72,21 @@ Deno.serve(async (req) => {
     results.push(r);
   }
 
+  const rateLimited = tickerMatches.rateLimited || nameMatches.rateLimited;
+
+  // Fuer den Auslastungstracker im Admin-Dashboard - separate Tabelle statt
+  // request_log (siehe Migration), Logging-Fehler duerfen die eigentliche
+  // Suche nicht beeintraechtigen.
+  try {
+    await supabase.from("search_log").insert({ query, rate_limited: rateLimited });
+  } catch {
+    // ignorieren
+  }
+
   return new Response(
     JSON.stringify({
       results: results.slice(0, 15),
-      rate_limited: tickerMatches.rateLimited || nameMatches.rateLimited,
+      rate_limited: rateLimited,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
