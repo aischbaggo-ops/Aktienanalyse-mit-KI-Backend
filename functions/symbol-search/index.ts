@@ -53,11 +53,30 @@ async function fmpSearch(endpoint: string, query: string): Promise<FmpSearchOutc
 // immer als Suffix an, z.B. NVDA.NE/NVD.DE - die Heimatnotierung bleibt
 // suffixfrei), USD als Waehrung, und NASDAQ/NYSE als Boerse (die beiden
 // primaeren US-Boersen). Nur der ERSTE Treffer, der alle drei Kriterien
-// erfuellt, wird markiert - die Ergebnisliste ist bereits relevanzsortiert
-// (Ticker-Exakttreffer zuerst), ein gleichnamiger Fonds/ETF mit denselben
-// Oberflaechen-Merkmalen (z.B. "APPLX" bei einer "apple"-Suche) taucht
-// dadurch typischerweise erst nach der echten Aktie auf.
+// erfuellt, wird markiert.
+//
+// Wichtig: laeuft ueber die VOLLE deduplizierte Liste, nicht erst nach dem
+// Anzeige-Zuschnitt auf 15 Treffer. Fund vom 16.9. (Suche "VISA"): FMPs
+// eigenes Relevanz-Ranking stellt bei kurzen/abweichenden Tickern (Visas
+// echter Ticker ist "V") Treffer mit Textaehnlichkeit zum Suchbegriff
+// (VISAX, VISA.NE, VISAGAR.BO, ...) vor die eigentliche Firma - "V" selbst
+// landete dadurch erst auf Position 16 von 31, ausserhalb des 15er-
+// Fensters. Wird der Primaer-Treffer erst nach dem Zuschnitt gesucht, wird
+// er nie gefunden UND dem Nutzer nie angezeigt. Das generelle FMP-Ranking-
+// Problem (viele Treffer vor der Aktie bei kurzen Tickern) bleibt bewusst
+// unangetastet, nur fuer den erkannten Primaer-Treffer wird eine Ausnahme
+// gemacht: liegt er ausserhalb der sichtbaren Top 15, wird er an den
+// Anfang gezogen, statt ihn dem Nutzer vorzuenthalten.
 const PRIMARY_EXCHANGES = new Set(["NASDAQ", "NYSE"]);
+const RESULT_LIMIT = 15;
+// Fund/ETF-Namen koennen dieselben Notierungs-Merkmale wie eine echte Aktie
+// haben (kein Suffix, USD, NASDAQ) - z.B. "VISAX" (ein Fonds) bei der Suche
+// "VISA", waehrend Visa Inc. selbst Ticker "V" traegt. Ohne Typ-Indikator
+// von FMP (siehe Kommentar oben) ist der Name das einzige verfuegbare
+// Signal dagegen. Bewusst simpel/unvollstaendig (z.B. manche REITs heissen
+// legitim "... Trust") - reicht als Faustregel, filtert nichts heraus,
+// nur fuer die Sternvergabe relevant.
+const FUND_NAME_PATTERN = /\b(fund|etf|trust|shares|portfolio)\b/i;
 
 function markPrimary(results: SearchResult[]): (SearchResult & { isPrimary: boolean })[] {
   let marked = false;
@@ -67,7 +86,8 @@ function markPrimary(results: SearchResult[]): (SearchResult & { isPrimary: bool
       !r.symbol.includes(".") &&
       r.currency === "USD" &&
       r.exchange !== null &&
-      PRIMARY_EXCHANGES.has(r.exchange);
+      PRIMARY_EXCHANGES.has(r.exchange) &&
+      !FUND_NAME_PATTERN.test(r.name);
     if (isPrimary) marked = true;
     return { ...r, isPrimary };
   });
@@ -116,9 +136,16 @@ Deno.serve(async (req) => {
     // ignorieren
   }
 
+  const markedAll = markPrimary(results);
+  const primaryIdx = markedAll.findIndex((r) => r.isPrimary);
+  if (primaryIdx >= RESULT_LIMIT) {
+    const [primary] = markedAll.splice(primaryIdx, 1);
+    markedAll.unshift(primary);
+  }
+
   return new Response(
     JSON.stringify({
-      results: markPrimary(results.slice(0, 15)),
+      results: markedAll.slice(0, RESULT_LIMIT),
       rate_limited: rateLimited,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
