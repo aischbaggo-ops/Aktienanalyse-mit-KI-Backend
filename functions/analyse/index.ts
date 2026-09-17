@@ -309,12 +309,6 @@ Deno.serve(async (req) => {
 
   if (isFresh) {
     await supabase.from("request_log").insert({ ticker, user_id, source: "cache", max_age_days, force_refresh });
-    if (user_id) {
-      await supabase.from("watchlists").upsert(
-        { user_id, ticker, analysis_id: existing.id },
-        { onConflict: "user_id,ticker" },
-      );
-    }
     return new Response(JSON.stringify({ source: "cache", ticker, analysis: existing }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
