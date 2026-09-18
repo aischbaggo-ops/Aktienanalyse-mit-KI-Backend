@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { encryptSecret } from "../_shared/crypto.ts";
+import { logFunctionError } from "../_shared/logFunctionError.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -60,6 +61,7 @@ Deno.serve(async (req) => {
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   const { error } = await adminClient.from("user_api_keys").upsert(row, { onConflict: "user_id" });
   if (error) {
+    await logFunctionError("save-api-keys", userId, error.message);
     return new Response(JSON.stringify({ error: `Speichern fehlgeschlagen: ${error.message}` }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
