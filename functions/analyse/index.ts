@@ -2,17 +2,18 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { computeScores, computeStabilityScore, computePrognose, computeValuation, computeAnalystConsensus, computeBankRatings, ampelLabel, arr, first } from "../_shared/scoring.ts";
 import { buildUserPrompt, callClaude, parseClaudeResponse, PRICING, QUAL_WEIGHTS } from "../_shared/claude.ts";
+import { verifyUser } from "../_shared/auth.ts";
+import { loadUserApiKeys } from "../_shared/userKeys.ts";
 
-const FMP_API_KEY = Deno.env.get("FMP_API_KEY")!;
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-async function fmpGet(path: string) {
+async function fmpGet(path: string, fmpKey: string) {
   try {
-    const url = FMP_BASE + path + (path.includes("?") ? "&" : "?") + "apikey=" + FMP_API_KEY;
+    const url = FMP_BASE + path + (path.includes("?") ? "&" : "?") + "apikey=" + fmpKey;
     const res = await fetch(url);
     const data = await res.json();
     return { ok: res.ok, data };
@@ -21,27 +22,27 @@ async function fmpGet(path: string) {
   }
 }
 
-async function fetchFmpData(ticker: string) {
+async function fetchFmpData(ticker: string, fmpKey: string) {
   const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades] = await Promise.all([
-    fmpGet(`/profile?symbol=${ticker}`),
-    fmpGet(`/stock-peers?symbol=${ticker}`),
-    fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`),
-    fmpGet(`/balance-sheet-statement?symbol=${ticker}&period=annual&limit=5`),
-    fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`),
-    fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`),
-    fmpGet(`/discounted-cash-flow?symbol=${ticker}`),
-    fmpGet(`/news/stock?symbols=${ticker}&limit=20`),
-    fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`),
-    fmpGet(`/historical-price-eod/full?symbol=%5EGSPC&from=2000-01-01`),
-    fmpGet(`/financial-scores?symbol=${ticker}`),
-    fmpGet(`/price-target-summary?symbol=${ticker}`),
-    fmpGet(`/grades?symbol=${ticker}`),
+    fmpGet(`/profile?symbol=${ticker}`, fmpKey),
+    fmpGet(`/stock-peers?symbol=${ticker}`, fmpKey),
+    fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey),
+    fmpGet(`/balance-sheet-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey),
+    fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey),
+    fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey),
+    fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey),
+    fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey),
+    fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`, fmpKey),
+    fmpGet(`/historical-price-eod/full?symbol=%5EGSPC&from=2000-01-01`, fmpKey),
+    fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey),
+    fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey),
+    fmpGet(`/grades?symbol=${ticker}`, fmpKey),
   ]);
   return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
-async function runAnalysis(ticker: string, logId: string, startedAt: number) {
+async function runAnalysis(ticker: string, logId: string, startedAt: number, fmpKey: string, claudeKey: string) {
   // Log-Marker fuer Pruefpunkt 3 ("Logs nach dem ersten Testlauf ansehen"):
   // Wenn diese Zeile in Supabase -> Edge Functions -> Logs auftaucht, NACHDEM
   // der Response laengst beim Client angekommen ist, laeuft waitUntil() wie
@@ -49,7 +50,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
   console.log(`[analyse] background run started ticker=${ticker} logId=${logId}`);
 
   try {
-    const fmpData = await fetchFmpData(ticker);
+    const fmpData = await fetchFmpData(ticker, fmpKey);
     const scoreData = computeScores(fmpData);
 
     const stability = computeStabilityScore(
@@ -109,7 +110,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
     };
 
     const userPrompt = buildUserPrompt(scoreData);
-    const claudeRaw = await callClaude("claude-sonnet-5", userPrompt);
+    const claudeRaw = await callClaude("claude-sonnet-5", userPrompt, claudeKey);
     const parsed = parseClaudeResponse(claudeRaw);
 
     const scoreFundamental = scoreData.fundamental.score;
@@ -169,7 +170,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number) {
 
     if (needsCheck) {
       console.log(`[analyse] deviation check triggered ticker=${ticker} deviation=${deviation?.toFixed(1)} historyAvg=${historyAvg?.toFixed(1)} historyN=${historyN}`);
-      const claudeRaw2 = await callClaude("claude-opus-5", userPrompt);
+      const claudeRaw2 = await callClaude("claude-opus-5", userPrompt, claudeKey);
       const parsed2 = parseClaudeResponse(claudeRaw2);
       const scoreQualitaet2 = parsed2.scoreQualitaet ?? scoreQualitaet;
       let scoreTotal2 = scoreTotal;
@@ -288,9 +289,17 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers: corsHeaders });
   }
 
+  const auth = await verifyUser(req);
+  if ("error" in auth) {
+    return new Response(JSON.stringify({ error: auth.error }), {
+      status: auth.status,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const user_id = auth.userId;
+
   const body = await req.json().catch(() => ({}));
   const ticker = (body.ticker || "").toString().trim().toUpperCase();
-  const user_id = body.user_id || null;
   const max_age_days = body.max_age_days ?? 7;
   const force_refresh = body.force_refresh === true;
 
@@ -307,11 +316,26 @@ Deno.serve(async (req) => {
     isFresh = ageMs <= max_age_days * 24 * 60 * 60 * 1000;
   }
 
+  // Cache-Treffer brauchen keinen externen API-Aufruf und damit auch
+  // keinen eigenen Key - nur der "processing"-Pfad unten (echter neuer
+  // Lauf) verbraucht FMP/Claude-Kontingent des Nutzers.
   if (isFresh) {
     await supabase.from("request_log").insert({ ticker, user_id, source: "cache", max_age_days, force_refresh });
     return new Response(JSON.stringify({ source: "cache", ticker, analysis: existing }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // Eigene Keys laden, BEVOR irgendetwas in der DB angelegt/veraendert wird
+  // (stock_analyses/request_log) - sauberer Fehlschlag ohne Seiteneffekte,
+  // kein Ticker bleibt auf "running" haengen. Kein Rueckfall auf einen
+  // Service-Key, wenn einer der beiden Keys fehlt.
+  const { fmpKey, claudeKey } = await loadUserApiKeys(user_id);
+  if (!fmpKey || !claudeKey) {
+    return new Response(
+      JSON.stringify({ error: "Bitte hinterlege zuerst deinen eigenen FMP-/Claude-API-Key in den Einstellungen." }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   // Status auf running setzen (legt Zeile an, falls sie noch nicht existiert)
@@ -333,7 +357,7 @@ Deno.serve(async (req) => {
   // Sofort antworten, danach im Hintergrund weiterlaufen (Supabase-eigenes
   // Aequivalent zum n8n "fire and continue"-Muster).
   // @ts-ignore: EdgeRuntime ist eine Supabase-spezifische globale API
-  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt));
+  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, fmpKey, claudeKey));
 
   return new Response(JSON.stringify({ source: "processing", ticker, status: "running" }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },

@@ -1,8 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import { verifyUser } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 Deno.serve(async (req) => {
@@ -16,32 +16,19 @@ Deno.serve(async (req) => {
     });
   }
 
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  if (!token) {
-    return new Response(JSON.stringify({ error: "Kein Authorization-Token uebergeben." }), {
-      status: 401,
+  // SICHERHEITSKRITISCH: verifyUser() liefert den Nutzer, dem der Token
+  // tatsaechlich gehoert, unabhaengig davon, was der Client sonst im
+  // Request behauptet. Fuer eine Konto-Loeschung wird NIE eine user_id aus
+  // dem Body verwendet. Ohne diese Pruefung koennte jeder durch simples
+  // Aendern eines Body-Felds ein fremdes Konto loeschen.
+  const auth = await verifyUser(req);
+  if ("error" in auth) {
+    return new Response(JSON.stringify({ error: auth.error }), {
+      status: auth.status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
-
-  // SICHERHEITSKRITISCH: Anon-Key-Client NUR zur Token-Validierung -
-  // liefert den Nutzer, dem DIESER Token tatsaechlich gehoert, unabhaengig
-  // davon, was der Client sonst im Request behauptet. Anders als
-  // analyse/symbol-search (die einer vom Client mitgeschickten user_id im
-  // Body vertrauen - dort tolerierbar, hier nicht) wird fuer eine
-  // Konto-Loeschung NIE eine user_id aus dem Body verwendet. Ohne diese
-  // Pruefung koennte jeder durch simples Aendern eines Body-Felds ein
-  // fremdes Konto loeschen.
-  const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  const { data: userData, error: userError } = await authClient.auth.getUser(token);
-  if (userError || !userData?.user) {
-    return new Response(JSON.stringify({ error: "Ungueltiger oder abgelaufener Token." }), {
-      status: 401,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
-  const userId = userData.user.id;
+  const userId = auth.userId;
 
   // Ab hier ausschliesslich mit der verifizierten userId arbeiten. Der
   // Service-Role-Client wird nur noch fuer die eigentlichen Loesch-
@@ -69,6 +56,17 @@ Deno.serve(async (req) => {
   if (requestLogError) {
     return new Response(
       JSON.stringify({ error: `Anfrage-Verlauf konnte nicht geloescht werden: ${requestLogError.message}` }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // Neu seit den eigenen API-Keys: verschluesselte FMP-/Claude-Key-Zeile
+  // ebenfalls entfernen, sonst blieben Ciphertext-Reste ohne Bezug zu einem
+  // existierenden Konto zurueck.
+  const { error: apiKeysError } = await adminClient.from("user_api_keys").delete().eq("user_id", userId);
+  if (apiKeysError) {
+    return new Response(
+      JSON.stringify({ error: `API-Keys konnten nicht geloescht werden: ${apiKeysError.message}` }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }

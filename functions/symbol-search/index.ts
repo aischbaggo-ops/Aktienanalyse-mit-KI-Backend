@@ -1,7 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import { verifyUser } from "../_shared/auth.ts";
+import { loadUserApiKeys } from "../_shared/userKeys.ts";
 
-const FMP_API_KEY = Deno.env.get("FMP_API_KEY")!;
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -34,9 +35,9 @@ interface FmpSearchOutcome {
   rateLimited: boolean;
 }
 
-async function fmpSearch(endpoint: string, query: string): Promise<FmpSearchOutcome> {
+async function fmpSearch(endpoint: string, query: string, fmpKey: string): Promise<FmpSearchOutcome> {
   try {
-    const res = await fetch(`${FMP_BASE}/${endpoint}?query=${encodeURIComponent(query)}&apikey=${FMP_API_KEY}`);
+    const res = await fetch(`${FMP_BASE}/${endpoint}?query=${encodeURIComponent(query)}&apikey=${fmpKey}`);
     if (res.status === 429) return { results: [], rateLimited: true };
     if (!res.ok) return { results: [], rateLimited: false };
     return { results: mapResults(await res.json()), rateLimited: false };
@@ -98,6 +99,15 @@ Deno.serve(async (req) => {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
 
+  const auth = await verifyUser(req);
+  if ("error" in auth) {
+    return new Response(JSON.stringify({ error: auth.error }), {
+      status: auth.status,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const { userId } = auth;
+
   const url = new URL(req.url);
   const query = (url.searchParams.get("q") || "").trim();
 
@@ -107,14 +117,25 @@ Deno.serve(async (req) => {
     });
   }
 
+  // Sucht laufen jetzt gegen den eigenen FMP-Key des Nutzers statt gegen
+  // einen gemeinsamen Service-Key - kein automatischer Rueckfall, wenn er
+  // fehlt (sonst waere der Zweck der Umstellung unterlaufen).
+  const { fmpKey } = await loadUserApiKeys(userId);
+  if (!fmpKey) {
+    return new Response(
+      JSON.stringify({ error: "Bitte hinterlege zuerst deinen eigenen FMP-API-Key in den Einstellungen." }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   // Ticker-Praefixtreffer (search-symbol) UND Firmennamen-Treffer
   // (search-name) parallel abfragen - Ticker-Treffer haben Vorrang (kommen
   // zuerst in der Ergebnisliste), Namens-Treffer ergaenzen fuer Eingaben wie
   // "Apple" oder "Henkel", bei denen kein Ticker getippt wird. Nach Symbol
   // dedupliziert, falls derselbe Ticker in beiden Antworten auftaucht.
   const [tickerMatches, nameMatches] = await Promise.all([
-    fmpSearch("search-symbol", query),
-    fmpSearch("search-name", query),
+    fmpSearch("search-symbol", query, fmpKey),
+    fmpSearch("search-name", query, fmpKey),
   ]);
 
   const seen = new Set<string>();
@@ -129,7 +150,9 @@ Deno.serve(async (req) => {
 
   // Fuer den Auslastungstracker im Admin-Dashboard - separate Tabelle statt
   // request_log (siehe Migration), Logging-Fehler duerfen die eigentliche
-  // Suche nicht beeintraechtigen.
+  // Suche nicht beeintraechtigen. Bewusst weiterhin ohne user_id (search_log
+  // hat keine Spalte dafuer, siehe Konto-Loeschung-Auftrag) - nicht Teil
+  // dieses Auftrags, unveraendert gelassen.
   try {
     await supabase.from("search_log").insert({ query, rate_limited: rateLimited });
   } catch {

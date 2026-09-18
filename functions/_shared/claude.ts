@@ -1,5 +1,3 @@
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY")!;
-
 export const QUAL_WEIGHTS: Record<string, { w: number; optional: boolean }> = {
   "Geschaeftsmodell verstanden": { w: 1, optional: false },
   "Produkte vertraut, wuerde selbst nutzen": { w: 1, optional: false },
@@ -74,12 +72,14 @@ Fundamental=${scoreData.fundamental?.score}, Krisenstabilitaet=${scoreData.krise
 }
 
 // Ruft die echte Anthropic Messages API direkt per fetch auf (kein SDK-Import
-// noetig, funktioniert zuverlaessig in Deno).
-export async function callClaude(model: string, userPrompt: string) {
+// noetig, funktioniert zuverlaessig in Deno). apiKey kommt vom Aufrufer -
+// der eigene, entschluesselte Claude-Key des jeweiligen Nutzers (siehe
+// _shared/userKeys.ts), kein globaler Service-Key mehr.
+export async function callClaude(model: string, userPrompt: string, apiKey: string) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "x-api-key": ANTHROPIC_API_KEY,
+      "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
     },
