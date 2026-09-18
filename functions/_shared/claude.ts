@@ -29,7 +29,7 @@ export const PRICING: Record<string, { in: number; out: number }> = {
 };
 
 export const SYSTEM_PROMPT =
-  "Du bist ein erfahrener, konservativer Aktienanalyst. Du bewertest AUSSCHLIESSLICH die Qualitäts-Dimension (Business, Management, Öffentlichkeit) einer Aktie anhand der bereitgestellten Fakten (Firmenprofil, Peers, Nachrichten). Für JEDES der 20 vorgegebenen Kriterien vergibst du eine Ampel (gruen/gelb/rot) mit einer kurzen Begründung (1 Satz, möglichst knapp). Werte konservativ und faktenbasiert; wenn keine Information auffindbar ist, vergib grau mit der Begründung 'keine Information auffindbar' - grau ist ein eigener vierter Zustand, kein Gelb, und bedeutet \"nicht bewertbar\", nicht \"teilweise erfüllt\". No-Go-Logik: nur echter Betrug, erfundene Umsätze, verschwundenes Geld oder eine Fraud-Anklage gegen das Management rechtfertigen ein hartes Rot bei den Öffentlichkeits-K.O.-Kriterien (17-19) und no_go_hart=true; Kartellstrafen, Datenschutzbußen, Rückrufe, Umweltstrafen, Einzelrechtsstreits oder PR-Kontroversen sind nur gelb, kein K.O. Erstelle zusätzlich eine SWOT-Einordnung (staerken/schwaechen/chancen/risiken), jeweils 2 bis 4 knappe Stichpunkte (kurze Sätze, kein Fließtext), ausschließlich basierend auf den bereitgestellten Fakten - chancen und risiken sind vorausschauend (Markt/Wettbewerb/Regulierung), staerken/schwaechen beziehen sich auf den Ist-Zustand. Schreibe zusätzlich ein Fazit (2 bis 4 Sätze, konservativ, erwähnt Bewertung und Belastbarkeit) unter Einbezug der bereits berechneten Sub-Scores. Antworte AUSSCHLIESSLICH mit einem JSON-Objekt exakt in diesem Format, ohne jeglichen zusätzlichen Text davor oder danach, und achte darauf, das JSON vollständig und gültig abzuschließen:\n{\"kriterien\":[{\"name\":\"<exakter Kriteriumsname>\",\"ampel\":\"gruen|gelb|rot|grau\",\"begruendung\":\"...\"}],\"warnings\":[\"...\"],\"no_go_hart\":false,\"swot\":{\"staerken\":[\"...\"],\"schwaechen\":[\"...\"],\"chancen\":[\"...\"],\"risiken\":[\"...\"]},\"fazit\":\"...\"}";
+  "Du bist ein erfahrener, konservativer Aktienanalyst. Du bewertest AUSSCHLIESSLICH die Qualitäts-Dimension (Business, Management, Öffentlichkeit) einer Aktie anhand der bereitgestellten Fakten (Firmenprofil, Peers, Nachrichten). Für JEDES der 20 vorgegebenen Kriterien vergibst du eine Ampel (gruen/gelb/rot) mit einer kurzen Begründung (1 Satz, möglichst knapp). Werte konservativ und faktenbasiert; wenn keine Information auffindbar ist, vergib grau mit der Begründung 'keine Information auffindbar' - grau ist ein eigener vierter Zustand, kein Gelb, und bedeutet \"nicht bewertbar\", nicht \"teilweise erfüllt\". No-Go-Logik: nur echter Betrug, erfundene Umsätze, verschwundenes Geld oder eine Fraud-Anklage gegen das Management rechtfertigen ein hartes Rot bei den Öffentlichkeits-K.O.-Kriterien (17-19) und no_go_hart=true; Kartellstrafen, Datenschutzbußen, Rückrufe, Umweltstrafen, Einzelrechtsstreits oder PR-Kontroversen sind nur gelb, kein K.O. Erstelle zusätzlich eine SWOT-Einordnung (staerken/schwaechen/chancen/risiken), jeweils 2 bis 4 knappe Stichpunkte (kurze Sätze, kein Fließtext), ausschließlich basierend auf den bereitgestellten Fakten - chancen und risiken sind vorausschauend (Markt/Wettbewerb/Regulierung), staerken/schwaechen beziehen sich auf den Ist-Zustand. Schreibe zusätzlich ein Fazit (2 bis 4 Sätze, konservativ, erwähnt Bewertung und Belastbarkeit) unter Einbezug der bereits berechneten Sub-Scores. Uebermittle deine vollstaendige Analyse ausschliesslich ueber das bereitgestellte Tool (keine Erklaerung oder Zusammenfassung als separater Text) - fuelle jedes Feld vollstaendig aus.";
 
 const CRITERIA_LIST = `1. Geschaeftsmodell verstanden
 2. Produkte vertraut, wuerde selbst nutzen
@@ -71,10 +71,65 @@ BEREITS BERECHNETE SUB-SCORES (Kontext fuer das Fazit, NICHT selbst neu berechne
 Fundamental=${scoreData.fundamental?.score}, Krisenstabilitaet=${scoreData.krise?.score}, Trend=${scoreData.trend?.score}`;
 }
 
+// Name des Tools, ueber das Claude die Analyse strukturiert zurueckgibt
+// (statt als freier JSON-Text) - siehe QUALITAETS_TOOL unten.
+const QUALITAETS_TOOL_NAME = "submit_qualitaetsanalyse";
+
+// input_schema exakt aus dem bisherigen Text-JSON-Format abgeleitet (siehe
+// git-history von SYSTEM_PROMPT) - keine Felder hinzugefuegt/entfernt,
+// nur der Uebertragungsweg (Tool-Use statt Freitext-JSON-Parsing) geaendert.
+// kriterien[].name nutzt bewusst ein enum aus Object.keys(QUAL_WEIGHTS) als
+// einzige Quelle der Wahrheit - so kann Claude gar keinen Namen liefern, der
+// nicht exakt mit den QUAL_WEIGHTS-Schluesseln uebereinstimmt.
+const QUALITAETS_TOOL = {
+  name: QUALITAETS_TOOL_NAME,
+  description:
+    "Uebermittelt die vollstaendige Qualitaets-Analyse: Ampel-Bewertung fuer jedes der 20 vorgegebenen Kriterien, Warnungen, No-Go-Flag, SWOT und Fazit.",
+  input_schema: {
+    type: "object",
+    properties: {
+      kriterien: {
+        type: "array",
+        description: "Fuer JEDES der 20 vorgegebenen Kriterien genau ein Eintrag.",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", enum: Object.keys(QUAL_WEIGHTS) },
+            ampel: { type: "string", enum: ["gruen", "gelb", "rot", "grau"] },
+            begruendung: { type: "string", description: "Kurze Begruendung, 1 Satz, moeglichst knapp." },
+          },
+          required: ["name", "ampel", "begruendung"],
+        },
+      },
+      warnings: { type: "array", items: { type: "string" } },
+      no_go_hart: { type: "boolean" },
+      swot: {
+        type: "object",
+        properties: {
+          staerken: { type: "array", items: { type: "string" } },
+          schwaechen: { type: "array", items: { type: "string" } },
+          chancen: { type: "array", items: { type: "string" } },
+          risiken: { type: "array", items: { type: "string" } },
+        },
+        required: ["staerken", "schwaechen", "chancen", "risiken"],
+      },
+      fazit: { type: "string" },
+    },
+    required: ["kriterien", "warnings", "no_go_hart", "swot", "fazit"],
+  },
+};
+
 // Ruft die echte Anthropic Messages API direkt per fetch auf (kein SDK-Import
 // noetig, funktioniert zuverlaessig in Deno). apiKey kommt vom Aufrufer -
 // der eigene, entschluesselte Claude-Key des jeweiligen Nutzers (siehe
 // _shared/userKeys.ts), kein globaler Service-Key mehr.
+//
+// tool_choice erzwingt den Aufruf von QUALITAETS_TOOL - Claude liefert die
+// Analyse damit als strukturiertes, schema-validiertes Objekt statt als
+// freien JSON-Text. Das verhindert Parse-Fehler durch unescapte
+// Anführungszeichen o.ae. in generierten Freitextfeldern (begruendung/
+// fazit/SWOT), die bei reinem Text-JSON-Parsing sonst die ganze Antwort
+// unbrauchbar machen konnten.
 export async function callClaude(model: string, userPrompt: string, apiKey: string) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -88,6 +143,8 @@ export async function callClaude(model: string, userPrompt: string, apiKey: stri
       max_tokens: 6000,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userPrompt }],
+      tools: [QUALITAETS_TOOL],
+      tool_choice: { type: "tool", name: QUALITAETS_TOOL_NAME },
     }),
   });
   if (!res.ok) {
@@ -108,11 +165,16 @@ export function parseClaudeResponse(claudeRaw: any) {
   let claudeParsed: any = null;
   let parseError: string | null = null;
   try {
-    const textBlock = (claudeRaw.content || []).find((c: any) => c.type === "text");
-    let raw = textBlock ? textBlock.text : JSON.stringify(claudeRaw);
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) raw = match[0];
-    claudeParsed = JSON.parse(raw);
+    // Bei erzwungenem tool_choice liefert Anthropic das Ergebnis als
+    // bereits geparstes Objekt in content[].input (kein JSON.parse eines
+    // Freitext-Blocks mehr noetig, siehe callClaude()).
+    const toolBlock = (claudeRaw.content || []).find(
+      (c: any) => c.type === "tool_use" && c.name === "submit_qualitaetsanalyse",
+    );
+    if (!toolBlock) {
+      throw new Error("Kein tool_use-Block mit der erwarteten Analyse in der Claude-Antwort gefunden.");
+    }
+    claudeParsed = toolBlock.input;
   } catch (e) {
     parseError = (e as Error).message;
   }
