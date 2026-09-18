@@ -16,9 +16,14 @@ async function fmpGet(path: string, fmpKey: string) {
     const url = FMP_BASE + path + (path.includes("?") ? "&" : "?") + "apikey=" + fmpKey;
     const res = await fetch(url);
     const data = await res.json();
-    return { ok: res.ok, data };
+    // FMP liefert bei ungueltigem/abgelaufenem Key HTTP 401/403 zurueck, aber
+    // trotzdem einen normalen JSON-Body - ohne diese Unterscheidung sieht das
+    // im weiteren Verlauf wie eine ganz normale Datenluecke aus (z.B.
+    // Free-Plan-Limitierung) statt wie ein klar meldbarer Key-Fehler.
+    const authError = res.status === 401 || res.status === 403;
+    return { ok: res.ok, data, authError };
   } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    return { ok: false, error: (e as Error).message, authError: false };
   }
 }
 
@@ -38,7 +43,13 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
     fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey),
     fmpGet(`/grades?symbol=${ticker}`, fmpKey),
   ]);
-  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades };
+  // Ein einziger ungueltiger Key betrifft alle Aufrufe gleichermassen (selber
+  // Key fuer alle) - ein Treffer reicht, um den Lauf als Key-Fehler statt als
+  // Datenluecke einzuordnen.
+  const fmpAuthError = [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades].some(
+    (r) => r.authError === true,
+  );
+  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
@@ -51,6 +62,12 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
 
   try {
     const fmpData = await fetchFmpData(ticker, fmpKey);
+    if (fmpData.fmpAuthError) {
+      // Bewusst hier abbrechen statt mit leeren/teilweisen FMP-Daten
+      // weiterzurechnen - der bestehende catch-Block unten setzt damit
+      // status:"error" mit klarer Meldung statt data_quality:"limited".
+      throw new Error("FMP-API-Key ungültig oder abgelaufen.");
+    }
     const scoreData = computeScores(fmpData);
 
     const stability = computeStabilityScore(
