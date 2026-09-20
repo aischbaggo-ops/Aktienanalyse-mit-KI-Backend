@@ -4,6 +4,10 @@ import { computeScores, computeStabilityScore, computePrognose, computeValuation
 import { buildUserPrompt, callClaude, parseClaudeResponse, PRICING, QUAL_WEIGHTS } from "../_shared/claude.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
+import { requireAdmin } from "../_shared/adminGate.ts";
+
+// Obergrenze fuer den Admin-Recherche-Kontext im Analyse-Prompt (Zeichen).
+const MAX_ADMIN_CONTEXT_CHARS = 8000;
 
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
@@ -53,7 +57,7 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
-async function runAnalysis(ticker: string, logId: string, startedAt: number, fmpKey: string, claudeKey: string) {
+async function runAnalysis(ticker: string, logId: string, startedAt: number, fmpKey: string, claudeKey: string, adminContext: string | null) {
   // Log-Marker fuer Pruefpunkt 3 ("Logs nach dem ersten Testlauf ansehen"):
   // Wenn diese Zeile in Supabase -> Edge Functions -> Logs auftaucht, NACHDEM
   // der Response laengst beim Client angekommen ist, laeuft waitUntil() wie
@@ -126,7 +130,10 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
       },
     };
 
-    const userPrompt = buildUserPrompt(scoreData);
+    const userPrompt = buildUserPrompt(scoreData, adminContext);
+    if (adminContext) {
+      console.log(`[analyse] admin_chat_context attached ticker=${ticker} contextChars=${adminContext.length} promptChars=${userPrompt.length}`);
+    }
     const claudeRaw = await callClaude("claude-sonnet-5", userPrompt, claudeKey);
     const parsed = parseClaudeResponse(claudeRaw);
 
@@ -324,6 +331,29 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: "ticker fehlt im Request-Body" }), { status: 400, headers: corsHeaders });
   }
 
+  // Optionaler Kontext aus dem Admin-Chat. stock_analyses ist ein von ALLEN
+  // Nutzern geteilter Cache - freier Text im Prompt waere sonst ein Weg, fuer
+  // alle sichtbare Analysen zu beeinflussen. Daher nur fuer Admins, und nur
+  // in Verbindung mit force_refresh (bei einem Cache-Treffer wuerde der
+  // Kontext sonst stillschweigend verworfen).
+  let adminContext: string | null = null;
+  if (typeof body.admin_chat_context === "string" && body.admin_chat_context.trim()) {
+    const admin = await requireAdmin(user_id);
+    if (!admin.ok) {
+      return new Response(JSON.stringify({ error: admin.error }), {
+        status: admin.status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    if (!force_refresh) {
+      return new Response(JSON.stringify({ error: "admin_chat_context erfordert force_refresh=true." }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    adminContext = body.admin_chat_context.trim().slice(-MAX_ADMIN_CONTEXT_CHARS);
+  }
+
   const { data: existingRows } = await supabase.from("stock_analyses").select("*").eq("ticker", ticker).limit(1);
   const existing = existingRows?.[0] ?? null;
 
@@ -374,7 +404,7 @@ Deno.serve(async (req) => {
   // Sofort antworten, danach im Hintergrund weiterlaufen (Supabase-eigenes
   // Aequivalent zum n8n "fire and continue"-Muster).
   // @ts-ignore: EdgeRuntime ist eine Supabase-spezifische globale API
-  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, fmpKey, claudeKey));
+  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, fmpKey, claudeKey, adminContext));
 
   return new Response(JSON.stringify({ source: "processing", ticker, status: "running" }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
