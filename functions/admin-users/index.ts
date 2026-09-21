@@ -33,8 +33,11 @@ Deno.serve(async (req) => {
     const { data: usersData, error: usersError } = await supabase.auth.admin.listUsers({ page: 1, perPage: 200 });
     if (usersError) throw new Error(usersError.message);
 
-    const { data: profiles, error: profilesError } = await supabase.from("profiles").select("id, is_admin");
+    const { data: profiles, error: profilesError } = await supabase
+      .from("profiles")
+      .select("id, is_admin, username, last_seen_at");
     if (profilesError) throw new Error(profilesError.message);
+    const profileById = new Map((profiles ?? []).map((p: any) => [p.id, p]));
 
     const { data: access, error: accessError } = await supabase
       .from("feature_access")
@@ -50,6 +53,8 @@ Deno.serve(async (req) => {
       id: u.id,
       ref: u.id.slice(0, 8),
       email_masked: maskEmail(u.email),
+      username: profileById.get(u.id)?.username ?? null,
+      last_seen_at: profileById.get(u.id)?.last_seen_at ?? null,
       created_at: u.created_at,
       is_admin: adminIds.has(u.id),
       optionen: optionenIds.has(u.id),
