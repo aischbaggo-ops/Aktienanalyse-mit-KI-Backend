@@ -67,9 +67,13 @@ Deno.serve(async (req) => {
 
   const def = findIndexDefinition(indexId);
   if (!def) {
+    // Trifft auch fuer einen deaktivierten Index (DAX/MDAX/SDAX) zu, nicht
+    // nur fuer einen unbekannten - findIndexDefinition() liefert fuer beide
+    // Faelle undefined. Absichtlich, siehe Kommentar in indexDefinitions.ts.
+    const known = INDEX_DEFINITIONS.filter((d) => d.enabled).map((d) => d.id).join(", ");
     return new Response(
       JSON.stringify({
-        error: `Unbekannter Index "${indexId}". Bekannt: ${INDEX_DEFINITIONS.map((d) => d.id).join(", ")}.`,
+        error: `Unbekannter oder aktuell nicht verfuegbarer Index "${indexId}". Verfuegbar: ${known}.`,
       }),
       { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
