@@ -4,25 +4,24 @@
 // werden unabhaengig versioniert, daher hier bewusst dupliziert statt
 // geteilt.
 //
-// fmpPath === null bedeutet: FMP-Konstituenten-Endpoint fuer diesen Index
-// noch NICHT gegen einen echten Key bestaetigt (Stand 2026-09-22, siehe
-// Uebergabe-Notiz "Offene technische Pruefung vor Umsetzung"). Bis zur
-// Bestaetigung liefert getIndexConstituents() fuer diesen Index
-// ausschliesslich aus der Fallback-Tabelle index_constituents. Nach dem
-// Test: hier den bestaetigten Pfad eintragen (z.B. "/sp500-constituent")
-// UND mapFmpRow() unten anhand der echten Antwortfelder pruefen/anpassen.
+// FMP-Konstituenten-Endpoints (sp500-constituent/nasdaq-constituent/
+// dowjones-constituent) liefern im Free-Plan HTTP 402 (live gegen einen
+// echten Key getestet, 2026-09-22) - kein Fallback-Handling dafuer noetig,
+// getIndexConstituents() geht fuer alle Indizes direkt und ausschliesslich
+// gegen die manuell gepflegte Tabelle index_constituents (Seed-Daten aus
+// Wikipedia, siehe scripts/seed-index-constituents).
 export interface IndexDefinition {
   id: string;
   label: string;
-  fmpPath: string | null;
 }
 
 export const INDEX_DEFINITIONS: readonly IndexDefinition[] = [
-  { id: "dax", label: "DAX", fmpPath: null },
-  { id: "mdax", label: "MDAX", fmpPath: null },
-  { id: "sdax", label: "SDAX", fmpPath: null },
-  { id: "sp500", label: "S&P 500", fmpPath: null },
-  { id: "nasdaq100", label: "NASDAQ 100", fmpPath: null },
+  { id: "dax", label: "DAX" },
+  { id: "mdax", label: "MDAX" },
+  { id: "sdax", label: "SDAX" },
+  { id: "sp500", label: "S&P 500" },
+  { id: "nasdaq100", label: "NASDAQ 100" },
+  { id: "dowjones", label: "Dow Jones" },
 ];
 
 export function findIndexDefinition(indexId: string): IndexDefinition | undefined {
