@@ -314,12 +314,7 @@ export function computeScores(d: any) {
 
   // ---------- FUNDAMENTAL-ZEITREIHEN (fuer Etappe-1-Frontend-Charts) ----------
   // Reine Persistenz/Ableitung bereits abgerufener FMP-Rohdaten, keine neue
-  // Bewertungslogik. grossProfit/ebitda/operatingCashFlow/cash sind NEU im
-  // Projekt verwendete Feldnamen - EINMALIGER Diagnose-Log, nach Verifizierung
-  // im Supabase-Dashboard wieder entfernen.
-  if (incomeRaw.length) console.log("[computeScores] letzte income-Zeile (Keys pruefen):", JSON.stringify(incomeRaw[incomeRaw.length - 1]));
-  if (cashflowRaw.length) console.log("[computeScores] letzte cashflow-Zeile (Keys pruefen):", JSON.stringify(cashflowRaw[cashflowRaw.length - 1]));
-  if (balanceRaw.length) console.log("[computeScores] letzte balance-Zeile (Keys pruefen):", JSON.stringify(balanceRaw[balanceRaw.length - 1]));
+  // Bewertungslogik.
 
   const fundamentalSeries = {
     years: incomeRaw.map((r: any) => (r.date || "").slice(0, 4)),
@@ -377,9 +372,7 @@ export function computeScores(d: any) {
   }
 
   // Durchschnittliches Handelsvolumen (letzte ~90 Handelstage) fuer den
-  // Quick-Check "Liquiditaet". "volume" ist ein NEU verwendetes Feld -
-  // EINMALIGER Diagnose-Log, nach Verifizierung wieder entfernen.
-  if (stockRows.length) console.log("[computeScores] letzte price-Zeile (volume-Feld pruefen):", JSON.stringify(stockRows[stockRows.length - 1]));
+  // Quick-Check "Liquiditaet".
   const recentVolumes = stockRows.slice(-90).map((r: any) => r.volume).filter((v: any) => typeof v === "number");
   const avgVolume = recentVolumes.length ? recentVolumes.reduce((a: number, b: number) => a + b, 0) / recentVolumes.length : null;
 
@@ -681,13 +674,6 @@ export function computePrognose(d: any, currentPrice: number | null, sharesOut: 
   if (!target || !currentPrice || !sharesOut) {
     return { verfuegbar: false, hinweis: "Prognose nicht berechenbar (Analysten-Schaetzungen, Kurs oder Aktienzahl fehlen)." };
   }
-
-  // EINMALIGER Diagnose-Log (Runde 2): prueft, ob speziell die am weitesten
-  // entfernte Schaetzzeile (target) bei epsAvg/ebitdaAvg echte Zahlen oder
-  // null hat, und zeigt zum Vergleich alle verfuegbaren Zeilen. Nach
-  // Verifizierung wieder entfernen.
-  console.log(`[computePrognose] target row (verwendet):`, JSON.stringify(target));
-  console.log(`[computePrognose] alle estimates-Zeilen:`, JSON.stringify(estimatesRaw));
 
   const targetYear = Number((target.date || "").slice(0, 4));
   const currentYear = new Date().getFullYear();

@@ -9,6 +9,9 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+// Pentest-Scratchpad M1 - eigener Richtwert, im Auftrag nicht vorgegeben.
+const MAX_SEARCHES_PER_HOUR = 60;
+
 interface SearchResult {
   symbol: string;
   name: string;
@@ -128,6 +131,25 @@ Deno.serve(async (req) => {
     );
   }
 
+  // Rate-Limit (Pentest-Scratchpad M1) - VOR den FMP-Calls, damit ein
+  // ueberzogenes Limit auch tatsaechlich den externen Aufruf spart, nicht
+  // nur die Antwort. 60/Stunde ist grosszuegiger als bei analyse (jede
+  // Sucheingabe im Frontend loest einen Call aus, auch Tippen mehrerer
+  // Buchstaben nacheinander) - eigener Richtwert, im Auftrag nicht
+  // vorgegeben.
+  const searchRateLimitCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { count: recentSearchCount } = await supabase
+    .from("search_log")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .gte("requested_at", searchRateLimitCutoff);
+  if ((recentSearchCount ?? 0) >= MAX_SEARCHES_PER_HOUR) {
+    return new Response(
+      JSON.stringify({ error: `Zu viele Suchanfragen (max. ${MAX_SEARCHES_PER_HOUR}/Stunde). Bitte kurz warten.` }),
+      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   // Ticker-Praefixtreffer (search-symbol) UND Firmennamen-Treffer
   // (search-name) parallel abfragen - Ticker-Treffer haben Vorrang (kommen
   // zuerst in der Ergebnisliste), Namens-Treffer ergaenzen fuer Eingaben wie
@@ -150,11 +172,12 @@ Deno.serve(async (req) => {
 
   // Fuer den Auslastungstracker im Admin-Dashboard - separate Tabelle statt
   // request_log (siehe Migration), Logging-Fehler duerfen die eigentliche
-  // Suche nicht beeintraechtigen. Bewusst weiterhin ohne user_id (search_log
-  // hat keine Spalte dafuer, siehe Konto-Loeschung-Auftrag) - nicht Teil
-  // dieses Auftrags, unveraendert gelassen.
+  // Suche nicht beeintraechtigen. user_id seit Pentest-Scratchpad M1
+  // (Migration 20260923120000) - wird fuer das Rate-Limit oben gebraucht,
+  // "on delete cascade" raeumt die Zeilen bei einer Kontoloeschung
+  // automatisch mit auf.
   try {
-    await supabase.from("search_log").insert({ query, rate_limited: rateLimited });
+    await supabase.from("search_log").insert({ query, rate_limited: rateLimited, user_id: userId });
   } catch {
     // ignorieren
   }
