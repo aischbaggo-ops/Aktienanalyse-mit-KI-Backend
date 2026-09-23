@@ -9,12 +9,14 @@ import { logFunctionError } from "../_shared/logFunctionError.ts";
 // legt den Nutzer haendisch in Supabase an". Nur Admins, per verifyUser()
 // + requireAdmin() wie die anderen Admin-Functions.
 //
-// contact ist KEIN garantiertes E-Mail-Feld (siehe accessRequest.ts im
-// Frontend: das Formular erzwingt bewusst kein E-Mail-Format, damit auch
-// Telefonnummer/Signal-Handle etc. als Kontaktweg gehen) - inviteUserByEmail
-// braucht aber zwingend eine echte Adresse. Sieht contact nicht wie eine
-// E-Mail aus, wird hier bewusst abgebrochen (Status bleibt "neu", klare
-// Fehlermeldung) statt Supabase mit offensichtlich falscher Eingabe zu
+// Nutzt das separate email-Feld (nicht contact - das bleibt bewusst ein
+// freier Kontaktweg, siehe accessRequest.ts im Frontend). Die Insert-RLS-
+// Policy erzwingt email bei NEUEN Anfragen bereits als gueltige Adresse,
+// Alt-Anfragen (vor Einfuehrung des Felds, Migration 20260923100000) haben
+// aber email = null. Die Format-Pruefung hier bleibt deshalb als
+// Absicherung bestehen (Status bleibt "neu", klare Fehlermeldung) - sie
+// sollte fuer neue Anfragen nie mehr greifen, faengt aber genau diesen
+// Alt-Anfragen-Fall sauber ab statt Supabase mit ungueltiger Eingabe zu
 // belasten oder den Status faelschlich auf "erledigt" zu setzen.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -42,7 +44,7 @@ Deno.serve(async (req) => {
 
   const { data: request, error: loadError } = await supabase
     .from("access_requests")
-    .select("id, contact, status")
+    .select("id, email, status")
     .eq("id", requestId)
     .maybeSingle();
 
@@ -54,10 +56,10 @@ Deno.serve(async (req) => {
     return json({ error: `Anfrage ist bereits "${request.status}", keine erneute Einladung.` }, 409);
   }
 
-  const email = (request.contact ?? "").trim();
+  const email = (request.email ?? "").trim();
   if (!EMAIL_RE.test(email)) {
     return json(
-      { error: `Kontaktweg "${email}" ist keine gültige E-Mail-Adresse - bitte manuell einladen.` },
+      { error: `Diese Anfrage hat keine gültige E-Mail-Adresse hinterlegt (Alt-Anfrage?) - bitte manuell in Supabase einladen.` },
       400,
     );
   }
