@@ -282,12 +282,21 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
       },
       data_source: dataSource,
       error_message: parsed.parseError,
-      tokens_input: tokensInput,
-      tokens_output: tokensOutput,
-      cost_usd_claude: Math.round(costUsd * 1_000_000) / 1_000_000,
     };
 
     await supabase.from("stock_analyses").update(result).eq("ticker", ticker);
+
+    // Kosten/Token-Zahlen bewusst NICHT im geteilten stock_analyses-Cache
+    // (siehe migrations/20260924120000_hide_stock_analyses_costs.sql,
+    // Pentest-Fix) - eigene admin-only Tabelle statt allen Nutzern
+    // sichtbarer Spalten.
+    await supabase.from("stock_analyses_costs").upsert({
+      ticker,
+      tokens_input: tokensInput,
+      tokens_output: tokensOutput,
+      cost_usd_claude: Math.round(costUsd * 1_000_000) / 1_000_000,
+      updated_at: new Date().toISOString(),
+    });
 
     await supabase.from("request_log").update({
       status: result.error_message ? "error" : "done",
