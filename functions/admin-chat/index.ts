@@ -3,6 +3,7 @@ import { verifyUser } from "../_shared/auth.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
+import { logApiCall } from "../_shared/apiCallLog.ts";
 import { PRICING } from "../_shared/claude.ts";
 
 const CHAT_MODEL = "claude-sonnet-5";
@@ -76,6 +77,7 @@ Deno.serve(async (req) => {
   }
 
   let claudeRaw: any;
+  const claudeCallStart = Date.now();
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -103,6 +105,14 @@ Deno.serve(async (req) => {
   } catch (e) {
     const message = (e as Error).message;
     await logFunctionError("admin-chat", userId, message);
+    await logApiCall({
+      functionName: "admin-chat",
+      provider: "claude",
+      callType: "admin-chat",
+      success: false,
+      durationMs: Date.now() - claudeCallStart,
+      errorMessage: message,
+    });
     return new Response(JSON.stringify({ error: message }), {
       status: 502,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -116,6 +126,17 @@ Deno.serve(async (req) => {
   const rates = PRICING[CHAT_MODEL] || PRICING["claude-sonnet-5"];
   const costUsd =
     (tokensInput * rates.in + tokensOutput * rates.out) / 1_000_000 + webSearchCount * WEB_SEARCH_COST_PER_USE;
+
+  await logApiCall({
+    functionName: "admin-chat",
+    provider: "claude",
+    callType: "admin-chat",
+    success: true,
+    durationMs: Date.now() - claudeCallStart,
+    tokensInput,
+    tokensOutput,
+    costUsd,
+  });
 
   return new Response(
     JSON.stringify({

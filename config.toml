@@ -22,3 +22,9 @@ verify_jwt = false
 
 [functions.symbol-search]
 verify_jwt = false
+
+# Muss wie analyse/symbol-search ohne Supabase-Auth-Header aufrufbar bleiben -
+# genau die Faelle, die dieser Endpoint protokolliert (abgelaufener Passwort-
+# Link, fehlgeschlagener Login), haben per Definition keine gueltige Session.
+[functions.log-event]
+verify_jwt = false
