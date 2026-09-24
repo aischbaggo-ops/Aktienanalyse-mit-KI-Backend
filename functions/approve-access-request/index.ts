@@ -20,6 +20,18 @@ import { logFunctionError } from "../_shared/logFunctionError.ts";
 // belasten oder den Status faelschlich auf "erledigt" zu setzen.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Bugfix (kritisch): ohne explizites redirectTo landet der Einladungslink
+// auf der Root-Domain, die App hat dort aber keine Route, die den
+// Invite-Token abfaengt und ein Passwort setzen laesst - Supabase-js
+// verarbeitet den Token trotzdem automatisch (detectSessionInUrl) und
+// "verbraucht" ihn fuer eine einmalige Session OHNE dass je ein Passwort
+// existiert. Der Nutzer kann sich danach nie wieder einloggen. FRONTEND_URL
+// als Secret ueberschreibbar, faellt aber bewusst auf die bekannte
+// Produktions-Domain zurueck statt ein neues Pflicht-Secret einzufuehren -
+// genau die Art vergessenes Secret, die hier schon zweimal zu einem
+// Live-Bug gefuehrt hat (siehe Chat-Historie), soll sich nicht wiederholen.
+const FRONTEND_URL = Deno.env.get("FRONTEND_URL") || "https://aktienanalyse-mit-ki.vercel.app";
+
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -64,7 +76,9 @@ Deno.serve(async (req) => {
     );
   }
 
-  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(email);
+  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(email, {
+    redirectTo: `${FRONTEND_URL}/passwort-setzen`,
+  });
   if (inviteError) {
     await logFunctionError("approve-access-request", auth.userId, `inviteUserByEmail(${email}): ${inviteError.message}`);
     return json({ error: `Einladung fehlgeschlagen: ${inviteError.message}` }, 500);
