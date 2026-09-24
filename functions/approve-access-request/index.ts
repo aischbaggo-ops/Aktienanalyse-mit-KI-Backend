@@ -3,6 +3,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
+import { logAppEvent } from "../_shared/appEvents.ts";
 
 // Genehmigt eine Zugangsanfrage (access_requests) und loest direkt die
 // Konto-Einladung aus - ersetzt den bisherigen manuellen Schritt "Admin
@@ -104,6 +105,20 @@ Deno.serve(async (req) => {
       500,
     );
   }
+
+  // Positives Ereignis, nicht nur Fehler - erst im Zusammenspiel mit den
+  // password_set_*-Ereignissen der Passwort-setzen-Seite (siehe
+  // log-event/index.ts) wird der VOLLE Weg bis zum ersten erfolgreichen
+  // Login nachvollziehbar: "Einladung verschickt" ohne ein spaeteres
+  // "Passwort erfolgreich gesetzt" ist genau der stille Fehlschlag, der
+  // bei Knuts Einladung erst spaet auffiel.
+  await logAppEvent({
+    eventType: "invite_sent",
+    functionName: "approve-access-request",
+    status: "ok",
+    userId: auth.userId,
+    details: { request_id: requestId, email },
+  });
 
   return json({ ok: true, invited_at: invitedAt });
 });

@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
+import { logApiCall } from "../_shared/apiCallLog.ts";
 
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
@@ -36,12 +37,29 @@ interface FmpSearchOutcome {
 }
 
 async function fmpSearch(endpoint: string, query: string, fmpKey: string): Promise<FmpSearchOutcome> {
+  const startedAt = Date.now();
   try {
     const res = await fetch(`${FMP_BASE}/${endpoint}?query=${encodeURIComponent(query)}&apikey=${fmpKey}`);
+    await logApiCall({
+      functionName: "symbol-search",
+      provider: "fmp",
+      callType: `/${endpoint}`,
+      success: res.ok,
+      durationMs: Date.now() - startedAt,
+      errorMessage: res.ok ? null : `HTTP ${res.status}`,
+    });
     if (res.status === 429) return { results: [], rateLimited: true };
     if (!res.ok) return { results: [], rateLimited: false };
     return { results: mapResults(await res.json()), rateLimited: false };
-  } catch {
+  } catch (e) {
+    await logApiCall({
+      functionName: "symbol-search",
+      provider: "fmp",
+      callType: `/${endpoint}`,
+      success: false,
+      durationMs: Date.now() - startedAt,
+      errorMessage: (e as Error).message,
+    });
     return { results: [], rateLimited: false };
   }
 }

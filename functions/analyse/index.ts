@@ -5,6 +5,7 @@ import { buildUserPrompt, callClaude, parseClaudeResponse, PRICING, QUAL_WEIGHTS
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
+import { logApiCall } from "../_shared/apiCallLog.ts";
 
 // Obergrenze fuer den Admin-Recherche-Kontext im Analyse-Prompt (Zeichen).
 const MAX_ADMIN_CONTEXT_CHARS = 8000;
@@ -15,7 +16,8 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-async function fmpGet(path: string, fmpKey: string) {
+async function fmpGet(path: string, fmpKey: string, ticker: string) {
+  const startedAt = Date.now();
   try {
     const url = FMP_BASE + path + (path.includes("?") ? "&" : "?") + "apikey=" + fmpKey;
     const res = await fetch(url);
@@ -25,27 +27,45 @@ async function fmpGet(path: string, fmpKey: string) {
     // im weiteren Verlauf wie eine ganz normale Datenluecke aus (z.B.
     // Free-Plan-Limitierung) statt wie ein klar meldbarer Key-Fehler.
     const authError = res.status === 401 || res.status === 403;
+    await logApiCall({
+      functionName: "analyse",
+      provider: "fmp",
+      callType: path.split("?")[0],
+      ticker,
+      success: res.ok,
+      durationMs: Date.now() - startedAt,
+      errorMessage: res.ok ? null : `HTTP ${res.status}`,
+    });
     return { ok: res.ok, data, authError };
   } catch (e) {
+    await logApiCall({
+      functionName: "analyse",
+      provider: "fmp",
+      callType: path.split("?")[0],
+      ticker,
+      success: false,
+      durationMs: Date.now() - startedAt,
+      errorMessage: (e as Error).message,
+    });
     return { ok: false, error: (e as Error).message, authError: false };
   }
 }
 
 async function fetchFmpData(ticker: string, fmpKey: string) {
   const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades] = await Promise.all([
-    fmpGet(`/profile?symbol=${ticker}`, fmpKey),
-    fmpGet(`/stock-peers?symbol=${ticker}`, fmpKey),
-    fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey),
-    fmpGet(`/balance-sheet-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey),
-    fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey),
-    fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey),
-    fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey),
-    fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey),
-    fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`, fmpKey),
-    fmpGet(`/historical-price-eod/full?symbol=%5EGSPC&from=2000-01-01`, fmpKey),
-    fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey),
-    fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey),
-    fmpGet(`/grades?symbol=${ticker}`, fmpKey),
+    fmpGet(`/profile?symbol=${ticker}`, fmpKey, ticker),
+    fmpGet(`/stock-peers?symbol=${ticker}`, fmpKey, ticker),
+    fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
+    fmpGet(`/balance-sheet-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
+    fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
+    fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey, ticker),
+    fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey, ticker),
+    fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey, ticker),
+    fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`, fmpKey, ticker),
+    fmpGet(`/historical-price-eod/full?symbol=%5EGSPC&from=2000-01-01`, fmpKey, ticker),
+    fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey, ticker),
+    fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey, ticker),
+    fmpGet(`/grades?symbol=${ticker}`, fmpKey, ticker),
   ]);
   // Ein einziger ungueltiger Key betrifft alle Aufrufe gleichermassen (selber
   // Key fuer alle) - ein Treffer reicht, um den Lauf als Key-Fehler statt als
@@ -134,8 +154,21 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
     if (adminContext) {
       console.log(`[analyse] admin_chat_context attached ticker=${ticker} contextChars=${adminContext.length} promptChars=${userPrompt.length}`);
     }
+    const claudeCallStart = Date.now();
     const claudeRaw = await callClaude("claude-sonnet-5", userPrompt, claudeKey);
     const parsed = parseClaudeResponse(claudeRaw);
+    await logApiCall({
+      functionName: "analyse",
+      provider: "claude",
+      callType: "qualitaet-analyse",
+      ticker,
+      success: !parsed.parseError,
+      durationMs: Date.now() - claudeCallStart,
+      tokensInput: parsed.tokensInput,
+      tokensOutput: parsed.tokensOutput,
+      costUsd: parsed.costUsd,
+      errorMessage: parsed.parseError,
+    });
 
     const scoreFundamental = scoreData.fundamental.score;
     const scoreKrise = scoreData.krise.score;
@@ -195,8 +228,21 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
 
     if (needsCheck) {
       console.log(`[analyse] deviation check triggered ticker=${ticker} deviation=${deviation?.toFixed(1)} historyAvg=${historyAvg?.toFixed(1)} historyN=${historyN}`);
+      const claudeCallStart2 = Date.now();
       const claudeRaw2 = await callClaude("claude-opus-5", userPrompt, claudeKey);
       const parsed2 = parseClaudeResponse(claudeRaw2);
+      await logApiCall({
+        functionName: "analyse",
+        provider: "claude",
+        callType: "qualitaet-analyse-kontrolle",
+        ticker,
+        success: !parsed2.parseError,
+        durationMs: Date.now() - claudeCallStart2,
+        tokensInput: parsed2.tokensInput,
+        tokensOutput: parsed2.tokensOutput,
+        costUsd: parsed2.costUsd,
+        errorMessage: parsed2.parseError,
+      });
       const scoreQualitaet2 = parsed2.scoreQualitaet ?? scoreQualitaet;
       let scoreTotal2 = scoreTotal;
       if ([scoreFundamental, scoreQualitaet2, scoreKrise, scoreTrend].every((x) => typeof x === "number")) {
