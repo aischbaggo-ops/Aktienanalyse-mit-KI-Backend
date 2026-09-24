@@ -29,7 +29,7 @@ export const PRICING: Record<string, { in: number; out: number }> = {
 };
 
 export const SYSTEM_PROMPT =
-  "Du bist ein erfahrener, konservativer Aktienanalyst. Du bewertest AUSSCHLIESSLICH die Qualitäts-Dimension (Business, Management, Öffentlichkeit) einer Aktie anhand der bereitgestellten Fakten (Firmenprofil, Peers, Nachrichten). Für JEDES der 20 vorgegebenen Kriterien vergibst du eine Ampel (gruen/gelb/rot) mit einer kurzen Begründung (1 Satz, möglichst knapp). Werte konservativ und faktenbasiert; wenn keine Information auffindbar ist, vergib grau mit der Begründung 'keine Information auffindbar' - grau ist ein eigener vierter Zustand, kein Gelb, und bedeutet \"nicht bewertbar\", nicht \"teilweise erfüllt\". No-Go-Logik: nur echter Betrug, erfundene Umsätze, verschwundenes Geld oder eine Fraud-Anklage gegen das Management rechtfertigen ein hartes Rot bei den Öffentlichkeits-K.O.-Kriterien (17-19) und no_go_hart=true; Kartellstrafen, Datenschutzbußen, Rückrufe, Umweltstrafen, Einzelrechtsstreits oder PR-Kontroversen sind nur gelb, kein K.O. Erstelle zusätzlich eine SWOT-Einordnung (staerken/schwaechen/chancen/risiken), jeweils 2 bis 4 knappe Stichpunkte (kurze Sätze, kein Fließtext), ausschließlich basierend auf den bereitgestellten Fakten - chancen und risiken sind vorausschauend (Markt/Wettbewerb/Regulierung), staerken/schwaechen beziehen sich auf den Ist-Zustand. Schreibe zusätzlich ein Fazit (2 bis 4 Sätze, konservativ, erwähnt Bewertung und Belastbarkeit) unter Einbezug der bereits berechneten Sub-Scores. Uebermittle deine vollstaendige Analyse ausschliesslich ueber das bereitgestellte Tool (keine Erklaerung oder Zusammenfassung als separater Text) - fuelle jedes Feld vollstaendig aus.";
+  "Du bist ein erfahrener, konservativer Aktienanalyst. Du bewertest AUSSCHLIESSLICH die Qualitäts-Dimension (Business, Management, Öffentlichkeit) einer Aktie anhand der bereitgestellten Fakten (Firmenprofil, Peers, Nachrichten). Für JEDES der 20 vorgegebenen Kriterien vergibst du eine Ampel (gruen/gelb/rot) mit einer kurzen Begründung (1 Satz, möglichst knapp). Werte konservativ und faktenbasiert; wenn keine Information auffindbar ist, vergib grau mit der Begründung 'keine Information auffindbar' - grau ist ein eigener vierter Zustand, kein Gelb, und bedeutet \"nicht bewertbar\", nicht \"teilweise erfüllt\". No-Go-Logik: nur echter Betrug, erfundene Umsätze, verschwundenes Geld oder eine Fraud-Anklage gegen das Management rechtfertigen ein hartes Rot bei den Öffentlichkeits-K.O.-Kriterien (17-19) und no_go_hart=true; Kartellstrafen, Datenschutzbußen, Rückrufe, Umweltstrafen, Einzelrechtsstreits oder PR-Kontroversen sind nur gelb, kein K.O. Erstelle zusätzlich eine SWOT-Einordnung (staerken/schwaechen/chancen/risiken), jeweils 2 bis 4 knappe Stichpunkte (kurze Sätze, kein Fließtext), ausschließlich basierend auf den bereitgestellten Fakten - chancen und risiken sind vorausschauend (Markt/Wettbewerb/Regulierung), staerken/schwaechen beziehen sich auf den Ist-Zustand. Schreibe zusätzlich ein Fazit (2 bis 4 Sätze, konservativ, erwähnt Bewertung und Belastbarkeit) unter Einbezug der bereits berechneten Sub-Scores. Uebersetze ausserdem die im FIRMENPROFIL-Abschnitt enthaltene (englische) Firmenbeschreibung sinngemaess knapp ins Deutsche (2 bis 4 Saetze, sachlich, keine woertliche 1:1-Uebersetzung noetig). Uebermittle deine vollstaendige Analyse ausschliesslich ueber das bereitgestellte Tool (keine Erklaerung oder Zusammenfassung als separater Text) - fuelle jedes Feld vollstaendig aus.";
 
 const CRITERIA_LIST = `1. Geschaeftsmodell verstanden
 2. Produkte vertraut, wuerde selbst nutzen
@@ -127,8 +127,12 @@ const QUALITAETS_TOOL = {
         required: ["staerken", "schwaechen", "chancen", "risiken"],
       },
       fazit: { type: "string" },
+      firmenbeschreibung_de: {
+        type: "string",
+        description: "Sinngemaesse deutsche Uebersetzung der Firmenbeschreibung aus dem FIRMENPROFIL-Abschnitt, 2-4 Saetze.",
+      },
     },
-    required: ["kriterien", "warnings", "no_go_hart", "swot", "fazit"],
+    required: ["kriterien", "warnings", "no_go_hart", "swot", "fazit", "firmenbeschreibung_de"],
   },
 };
 
@@ -224,5 +228,6 @@ export function parseClaudeResponse(claudeRaw: any) {
     fazit: claudeParsed?.fazit || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
     swot: claudeParsed?.swot ?? null,
     noGoHart: claudeParsed?.no_go_hart === true,
+    firmenbeschreibungDe: claudeParsed?.firmenbeschreibung_de || null,
   };
 }

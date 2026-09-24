@@ -144,6 +144,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
     let swot = parsed.swot;
     let noGoHart = parsed.noGoHart;
     let fazit = parsed.fazit;
+    let firmenbeschreibungDe = parsed.firmenbeschreibungDe;
     let scoreTotal: number | null = null;
     if ([scoreFundamental, scoreQualitaet, scoreKrise, scoreTrend].every((x) => typeof x === "number")) {
       scoreTotal = Math.round(0.35 * scoreFundamental! + 0.25 * scoreQualitaet! + 0.20 * scoreKrise! + 0.20 * scoreTrend!);
@@ -226,6 +227,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
       swot = parsed2.swot;
       noGoHart = parsed2.noGoHart;
       fazit = parsed2.fazit ?? fazit;
+      firmenbeschreibungDe = parsed2.firmenbeschreibungDe ?? firmenbeschreibungDe;
       tokensInput += parsed2.tokensInput;
       tokensOutput += parsed2.tokensOutput;
       costUsd += parsed2.costUsd;
@@ -270,7 +272,12 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
           marketCap: scoreData.profile?.marketCap ?? null,
           exchange: scoreData.profile?.exchange ?? null,
           industry: scoreData.profile?.industry ?? null,
-          description: scoreData.profile?.description || null,
+          // Deutsche Uebersetzung, von Claude im selben Analyse-Call erstellt
+          // (siehe _shared/claude.ts) - kein zusaetzlicher API-Call. Fallback
+          // auf die rohe englische FMP-Beschreibung nur, falls Claudes
+          // Tool-Aufruf ausnahmsweise keine Uebersetzung geliefert hat
+          // (z.B. Parse-Fehler) - besser eine englische Anzeige als keine.
+          description: firmenbeschreibungDe || scoreData.profile?.description || null,
         },
       },
       data_source: dataSource,
