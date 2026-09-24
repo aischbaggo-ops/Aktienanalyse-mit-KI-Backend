@@ -270,6 +270,7 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
           marketCap: scoreData.profile?.marketCap ?? null,
           exchange: scoreData.profile?.exchange ?? null,
           industry: scoreData.profile?.industry ?? null,
+          description: scoreData.profile?.description || null,
         },
       },
       data_source: dataSource,
