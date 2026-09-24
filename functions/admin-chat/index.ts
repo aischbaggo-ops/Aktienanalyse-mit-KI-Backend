@@ -4,7 +4,7 @@ import { requireAdmin } from "../_shared/adminGate.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
-import { PRICING } from "../_shared/claude.ts";
+import { CLAUDE_PRICING as PRICING } from "../_shared/llm/pricing.ts";
 
 const CHAT_MODEL = "claude-sonnet-5";
 
@@ -18,7 +18,7 @@ const MAX_WEB_SEARCHES_PER_TURN = 5;
 // Web-Search wird von Anthropic ZUSAETZLICH zum normalen Token-Preis
 // abgerechnet ($10 pro 1000 Suchen = $0.01/Suche, Stand Anthropic-
 // Preisliste September 2026, siehe "Usage and pricing" in der Web-Search-
-// Tool-Doku) - unabhaengig von PRICING aus _shared/claude.ts, das nur
+// Tool-Doku) - unabhaengig von PRICING aus _shared/llm/pricing.ts, das nur
 // Input-/Output-Token abdeckt.
 const WEB_SEARCH_COST_PER_USE = 0.01;
 

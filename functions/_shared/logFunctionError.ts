@@ -13,12 +13,22 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // Fehler-Response an den Client nie verhindern oder verzoegern - ein Fehler
 // beim Loggen selbst wird nur serverseitig per console.error sichtbar, nie
 // durchgereicht oder erneut geworfen.
-export async function logFunctionError(functionName: string, userId: string | null, errorMessage: string) {
+//
+// llmProvider (optional): bei einem Fehler im Zusammenhang mit einem
+// LLM-Call (analyse, admin-chat) sofort erkennbar, welcher Anbieter
+// betroffen war - unterschiedliche Rate-Limits/Fehlercodes pro Anbieter.
+export async function logFunctionError(
+  functionName: string,
+  userId: string | null,
+  errorMessage: string,
+  llmProvider?: string | null,
+) {
   try {
     const { error } = await supabase.from("function_errors").insert({
       function_name: functionName,
       user_id: userId,
       error_message: errorMessage,
+      llm_provider: llmProvider ?? null,
     });
     if (error) {
       console.error(`[logFunctionError] insert failed for ${functionName}:`, error.message);
