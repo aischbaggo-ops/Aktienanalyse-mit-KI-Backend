@@ -1,3 +1,4 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
@@ -5,6 +6,16 @@ import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { PRICING } from "../_shared/claude.ts";
+
+const supabase = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+);
+
+// Pentest-Scratchpad M1 - eigener Richtwert (kostenpflichtig durch Claude +
+// Websuche, aber nur fuer Admins erreichbar, daher grosszuegiger als
+// symbol-search).
+const MAX_CHATS_PER_HOUR = 30;
 
 const CHAT_MODEL = "claude-sonnet-5";
 
@@ -65,6 +76,24 @@ Deno.serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
+
+  // Rate-Limit (Pentest-Scratchpad M1) - vor dem Claude-Call, damit ein
+  // ueberzogenes Limit auch tatsaechlich die Kosten spart. Log-Zeile wird
+  // gleich danach geschrieben (zaehlt den Versuch, nicht nur Erfolge -
+  // gleiches Prinzip wie request_log bei analyse).
+  const chatRateLimitCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { count: recentChatCount } = await supabase
+    .from("admin_chat_log")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .gte("requested_at", chatRateLimitCutoff);
+  if ((recentChatCount ?? 0) >= MAX_CHATS_PER_HOUR) {
+    return new Response(
+      JSON.stringify({ error: `Zu viele Chat-Anfragen (max. ${MAX_CHATS_PER_HOUR}/Stunde). Bitte spaeter erneut versuchen.` }),
+      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+  await supabase.from("admin_chat_log").insert({ user_id: userId });
 
   // Eigener Claude-Key des Admins, wie bei analyse - kein globaler
   // Service-Key.

@@ -10,6 +10,15 @@ import { logApiCall } from "../_shared/apiCallLog.ts";
 // Obergrenze fuer den Admin-Recherche-Kontext im Analyse-Prompt (Zeichen).
 const MAX_ADMIN_CONTEXT_CHARS = 8000;
 
+// Rate-Limit fuer neue Analyse-Laeufe (Pentest-Scratchpad M1). BEWUSST
+// hoeher als der dort genannte Beispielwert (20/Stunde): das Batch-
+// Auswahl-Feature (Index-/Freitext-Batch, siehe useBatchAnalysis im
+// Frontend) erlaubt bis zu 100 Ticker in einem einzigen Lauf - 20/Stunde
+// wuerde jeden Batch-Lauf ueber 20 nicht gecachte Ticker mitten im Lauf
+// mit 429 abbrechen. 120 laesst einen vollen 100er-Batch plus etwas
+// Spielraum fuer normale Einzelanalysen in derselben Stunde zu.
+const MAX_ANALYSES_PER_HOUR = 120;
+
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -465,6 +474,28 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ source: "cache", ticker, analysis: existing }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // Rate-Limit NUR fuer echte neue Laeufe (Pentest-Scratchpad M1) - ein
+  // Cache-Treffer oben verbraucht kein FMP-/Claude-Kontingent und zaehlt
+  // deshalb bewusst nicht mit. Schuetzt vor versehentlichem oder absichtlichem
+  // Ueberlasten des eigenen FMP-Tageskontingents/der Claude-Kosten durch
+  // wiederholte force_refresh-Aufrufe, nicht primaer vor fremden Nutzern
+  // (die sowieso ihren eigenen Key brauchen).
+  const rateLimitCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { count: recentProcessingCount } = await supabase
+    .from("request_log")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", user_id)
+    .eq("source", "processing")
+    .gte("requested_at", rateLimitCutoff);
+  if ((recentProcessingCount ?? 0) >= MAX_ANALYSES_PER_HOUR) {
+    return new Response(
+      JSON.stringify({
+        error: `Zu viele neue Analysen (max. ${MAX_ANALYSES_PER_HOUR}/Stunde). Bitte spaeter erneut versuchen.`,
+      }),
+      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   // Eigene Keys laden, BEVOR irgendetwas in der DB angelegt/veraendert wird
