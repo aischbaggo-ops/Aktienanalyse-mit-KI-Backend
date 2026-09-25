@@ -1,11 +1,22 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { computeScores, computeStabilityScore, computePrognose, computeValuation, computeAnalystConsensus, computeBankRatings, ampelLabel, arr, first } from "../_shared/scoring.ts";
-import { buildUserPrompt, callClaude, parseClaudeResponse, PRICING, QUAL_WEIGHTS } from "../_shared/claude.ts";
+import { buildUserPrompt, callLLM, parseAnalysisResult, SYSTEM_PROMPT, type LlmProvider } from "../_shared/llm/index.ts";
 import { verifyUser } from "../_shared/auth.ts";
-import { loadUserApiKeys } from "../_shared/userKeys.ts";
+import { loadUserApiKeys, loadActiveLlmKey } from "../_shared/userKeys.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
+import { logFunctionError } from "../_shared/logFunctionError.ts";
+
+// Anzeigename je Anbieter fuer Fehlermeldungen - gleiche Bezeichnungen wie
+// im Frontend (KontoPage: "Claude (Standard) / ChatGPT / Gemini /
+// OpenRouter").
+const PROVIDER_LABELS: Record<LlmProvider, string> = {
+  claude: "Claude",
+  openai: "ChatGPT",
+  gemini: "Gemini",
+  openrouter: "OpenRouter",
+};
 
 // Obergrenze fuer den Admin-Recherche-Kontext im Analyse-Prompt (Zeichen).
 const MAX_ADMIN_CONTEXT_CHARS = 8000;
@@ -77,7 +88,17 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
-async function runAnalysis(ticker: string, logId: string, startedAt: number, fmpKey: string, claudeKey: string, adminContext: string | null) {
+async function runAnalysis(
+  ticker: string,
+  logId: string,
+  startedAt: number,
+  userId: string,
+  fmpKey: string,
+  provider: LlmProvider,
+  llmApiKey: string,
+  llmModel: string | null,
+  adminContext: string | null,
+) {
   // Log-Marker fuer Pruefpunkt 3 ("Logs nach dem ersten Testlauf ansehen"):
   // Wenn diese Zeile in Supabase -> Edge Functions -> Logs auftaucht, NACHDEM
   // der Response laengst beim Client angekommen ist, laeuft waitUntil() wie
@@ -165,16 +186,16 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
     if (adminContext) {
       console.log(`[analyse] admin_chat_context attached ticker=${ticker} contextChars=${adminContext.length} promptChars=${userPrompt.length}`);
     }
-    const claudeCallStart = Date.now();
-    const claudeRaw = await callClaude("claude-sonnet-5", userPrompt, claudeKey);
-    const parsed = parseClaudeResponse(claudeRaw);
+    const llmCallStart = Date.now();
+    const llmResult = await callLLM({ provider, apiKey: llmApiKey, model: llmModel, systemPrompt: SYSTEM_PROMPT, userPrompt });
+    const parsed = parseAnalysisResult(llmResult);
     await logApiCall({
       functionName: "analyse",
-      provider: "claude",
+      provider,
       callType: "qualitaet-analyse",
       ticker,
       success: !parsed.parseError,
-      durationMs: Date.now() - claudeCallStart,
+      durationMs: Date.now() - llmCallStart,
       tokensInput: parsed.tokensInput,
       tokensOutput: parsed.tokensOutput,
       costUsd: parsed.costUsd,
@@ -239,16 +260,23 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
 
     if (needsCheck) {
       console.log(`[analyse] deviation check triggered ticker=${ticker} deviation=${deviation?.toFixed(1)} historyAvg=${historyAvg?.toFixed(1)} historyN=${historyN}`);
-      const claudeCallStart2 = Date.now();
-      const claudeRaw2 = await callClaude("claude-opus-5", userPrompt, claudeKey);
-      const parsed2 = parseClaudeResponse(claudeRaw2);
+      // Kontrolllauf nutzt bei Claude weiterhin fest "claude-opus-5" -
+      // unabhaengig davon, welches Claude-Modell der Nutzer als primaeres
+      // hinterlegt hat (Bestandsverhalten). Fuer die drei anderen Anbieter
+      // gibt es kein editorial festgelegtes "staerkeres" Modell - der
+      // Kontrolllauf wiederholt dort bewusst mit demselben Modell, statt
+      // einen moeglicherweise ungueltigen/anderen Modellnamen zu raten.
+      const controlModel = provider === "claude" ? "claude-opus-5" : llmModel;
+      const llmCallStart2 = Date.now();
+      const llmResult2 = await callLLM({ provider, apiKey: llmApiKey, model: controlModel, systemPrompt: SYSTEM_PROMPT, userPrompt });
+      const parsed2 = parseAnalysisResult(llmResult2);
       await logApiCall({
         functionName: "analyse",
-        provider: "claude",
+        provider,
         callType: "qualitaet-analyse-kontrolle",
         ticker,
         success: !parsed2.parseError,
-        durationMs: Date.now() - claudeCallStart2,
+        durationMs: Date.now() - llmCallStart2,
         tokensInput: parsed2.tokensInput,
         tokensOutput: parsed2.tokensOutput,
         costUsd: parsed2.costUsd,
@@ -329,11 +357,12 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
           marketCap: scoreData.profile?.marketCap ?? null,
           exchange: scoreData.profile?.exchange ?? null,
           industry: scoreData.profile?.industry ?? null,
-          // Deutsche Uebersetzung, von Claude im selben Analyse-Call erstellt
-          // (siehe _shared/claude.ts) - kein zusaetzlicher API-Call. Fallback
-          // auf die rohe englische FMP-Beschreibung nur, falls Claudes
-          // Tool-Aufruf ausnahmsweise keine Uebersetzung geliefert hat
-          // (z.B. Parse-Fehler) - besser eine englische Anzeige als keine.
+          // Deutsche Uebersetzung, vom aktiven LLM-Anbieter im selben
+          // Analyse-Call erstellt (siehe _shared/llm/prompt.ts) - kein
+          // zusaetzlicher API-Call. Fallback auf die rohe englische FMP-
+          // Beschreibung nur, falls der Tool-Aufruf ausnahmsweise keine
+          // Uebersetzung geliefert hat (z.B. Parse-Fehler) - besser eine
+          // englische Anzeige als keine.
           description: firmenbeschreibungDe || scoreData.profile?.description || null,
         },
       },
@@ -397,6 +426,10 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
     await supabase.from("request_log").update({
       status: "error", duration_ms: Date.now() - startedAt, error_message: (e as Error).message,
     }).eq("id", logId);
+    // llm_provider mitloggen - bei Fehlern sofort erkennbar, welcher
+    // Anbieter betroffen war (Pentest-Scratchpad-Muster, siehe Migration
+    // 20260924100500).
+    await logFunctionError("analyse", userId, (e as Error).message, provider);
   }
 }
 
@@ -470,11 +503,15 @@ Deno.serve(async (req) => {
   // Eigene Keys laden, BEVOR irgendetwas in der DB angelegt/veraendert wird
   // (stock_analyses/request_log) - sauberer Fehlschlag ohne Seiteneffekte,
   // kein Ticker bleibt auf "running" haengen. Kein Rueckfall auf einen
-  // Service-Key, wenn einer der beiden Keys fehlt.
-  const { fmpKey, claudeKey } = await loadUserApiKeys(user_id);
-  if (!fmpKey || !claudeKey) {
+  // Service-Key, wenn einer der beiden Keys fehlt. LLM-Key/-Modell kommt
+  // vom AKTIVEN Anbieter des Nutzers (profiles.active_llm_provider,
+  // Default 'claude') statt fest von Claude - siehe _shared/userKeys.ts.
+  const { fmpKey } = await loadUserApiKeys(user_id);
+  const { provider, apiKey: llmApiKey, model: llmModel } = await loadActiveLlmKey(user_id);
+  if (!fmpKey || !llmApiKey) {
+    const missing = [!fmpKey ? "FMP" : null, !llmApiKey ? PROVIDER_LABELS[provider] : null].filter(Boolean);
     return new Response(
-      JSON.stringify({ error: "Bitte hinterlege zuerst deinen eigenen FMP-/Claude-API-Key in den Einstellungen." }),
+      JSON.stringify({ error: `Bitte hinterlege zuerst deinen eigenen ${missing.join("-/")}-API-Key in den Einstellungen.` }),
       { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
@@ -498,7 +535,7 @@ Deno.serve(async (req) => {
   // Sofort antworten, danach im Hintergrund weiterlaufen (Supabase-eigenes
   // Aequivalent zum n8n "fire and continue"-Muster).
   // @ts-ignore: EdgeRuntime ist eine Supabase-spezifische globale API
-  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, fmpKey, claudeKey, adminContext));
+  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, user_id, fmpKey, provider, llmApiKey, llmModel, adminContext));
 
   return new Response(JSON.stringify({ source: "processing", ticker, status: "running" }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },

@@ -1,3 +1,9 @@
+// Providerneutraler Prompt- und Schema-Teil - 1:1 aus der bisherigen
+// _shared/claude.ts uebernommen (siehe deren Git-Historie), nur der
+// Uebertragungsweg pro Anbieter (Tool-/Function-Calling-Format) liegt jetzt
+// in den einzelnen Adaptern (claude.ts/openai.ts/gemini.ts). Inhaltlich
+// UNVERAENDERT - keine neue Bewertungslogik, kein neues Feld.
+
 export const QUAL_WEIGHTS: Record<string, { w: number; optional: boolean }> = {
   "Geschaeftsmodell verstanden": { w: 1, optional: false },
   "Produkte vertraut, wuerde selbst nutzen": { w: 1, optional: false },
@@ -19,13 +25,6 @@ export const QUAL_WEIGHTS: Record<string, { w: number; optional: boolean }> = {
   "Keine schweren Vorwuerfe gegen Unternehmen": { w: 1, optional: false },
   "Keine schweren Vorwuerfe gegen Management": { w: 1, optional: false },
   "Nachrichtenlage positiv": { w: 0.5, optional: true },
-};
-
-export const PRICING: Record<string, { in: number; out: number }> = {
-  "claude-sonnet-5": { in: 2, out: 10 },
-  "claude-opus-5": { in: 5, out: 25 },
-  "claude-haiku-4-5-20251001": { in: 1, out: 5 },
-  "claude-fable-5-1": { in: 10, out: 50 },
 };
 
 export const SYSTEM_PROMPT =
@@ -84,92 +83,58 @@ BEREITS BERECHNETE SUB-SCORES (Kontext fuer das Fazit, NICHT selbst neu berechne
 Fundamental=${scoreData.fundamental?.score}, Krisenstabilitaet=${scoreData.krise?.score}, Trend=${scoreData.trend?.score}`;
 }
 
-// Name des Tools, ueber das Claude die Analyse strukturiert zurueckgibt
-// (statt als freier JSON-Text) - siehe QUALITAETS_TOOL unten.
-const QUALITAETS_TOOL_NAME = "submit_qualitaetsanalyse";
-
-// input_schema exakt aus dem bisherigen Text-JSON-Format abgeleitet (siehe
-// git-history von SYSTEM_PROMPT) - keine Felder hinzugefuegt/entfernt,
-// nur der Uebertragungsweg (Tool-Use statt Freitext-JSON-Parsing) geaendert.
+// Name/Beschreibung/Schema des Tools, ueber das das Modell die Analyse
+// strukturiert zurueckgibt (statt als freier JSON-Text). Providerneutral
+// als "lowercase JSON Schema" definiert (type: "object"/"string"/...) -
+// jeder Adapter uebersetzt das bei Bedarf in sein eigenes Wire-Format
+// (Gemini z.B. braucht GROSSGESCHRIEBENE Typnamen, siehe gemini.ts).
+//
+// input_schema exakt aus dem bisherigen Text-JSON-Format abgeleitet - keine
+// Felder hinzugefuegt/entfernt, nur der Uebertragungsweg geaendert.
 // kriterien[].name nutzt bewusst ein enum aus Object.keys(QUAL_WEIGHTS) als
-// einzige Quelle der Wahrheit - so kann Claude gar keinen Namen liefern, der
-// nicht exakt mit den QUAL_WEIGHTS-Schluesseln uebereinstimmt.
-const QUALITAETS_TOOL = {
-  name: QUALITAETS_TOOL_NAME,
-  description:
-    "Uebermittelt die vollstaendige Qualitaets-Analyse: Ampel-Bewertung fuer jedes der 20 vorgegebenen Kriterien, Warnungen, No-Go-Flag, SWOT und Fazit.",
-  input_schema: {
-    type: "object",
-    properties: {
-      kriterien: {
-        type: "array",
-        description: "Fuer JEDES der 20 vorgegebenen Kriterien genau ein Eintrag.",
-        items: {
-          type: "object",
-          properties: {
-            name: { type: "string", enum: Object.keys(QUAL_WEIGHTS) },
-            ampel: { type: "string", enum: ["gruen", "gelb", "rot", "grau"] },
-            begruendung: { type: "string", description: "Kurze Begruendung, 1 Satz, moeglichst knapp." },
-          },
-          required: ["name", "ampel", "begruendung"],
-        },
-      },
-      warnings: { type: "array", items: { type: "string" } },
-      no_go_hart: { type: "boolean" },
-      swot: {
+// einzige Quelle der Wahrheit - so kann das Modell gar keinen Namen liefern,
+// der nicht exakt mit den QUAL_WEIGHTS-Schluesseln uebereinstimmt.
+export const ANALYSIS_TOOL_NAME = "submit_qualitaetsanalyse";
+
+export const ANALYSIS_TOOL_DESCRIPTION =
+  "Uebermittelt die vollstaendige Qualitaets-Analyse: Ampel-Bewertung fuer jedes der 20 vorgegebenen Kriterien, Warnungen, No-Go-Flag, SWOT und Fazit.";
+
+export const ANALYSIS_TOOL_SCHEMA = {
+  type: "object",
+  properties: {
+    kriterien: {
+      type: "array",
+      description: "Fuer JEDES der 20 vorgegebenen Kriterien genau ein Eintrag.",
+      items: {
         type: "object",
         properties: {
-          staerken: { type: "array", items: { type: "string" } },
-          schwaechen: { type: "array", items: { type: "string" } },
-          chancen: { type: "array", items: { type: "string" } },
-          risiken: { type: "array", items: { type: "string" } },
+          name: { type: "string", enum: Object.keys(QUAL_WEIGHTS) },
+          ampel: { type: "string", enum: ["gruen", "gelb", "rot", "grau"] },
+          begruendung: { type: "string", description: "Kurze Begruendung, 1 Satz, moeglichst knapp." },
         },
-        required: ["staerken", "schwaechen", "chancen", "risiken"],
-      },
-      fazit: { type: "string" },
-      firmenbeschreibung_de: {
-        type: "string",
-        description: "Sinngemaesse deutsche Uebersetzung der Firmenbeschreibung aus dem FIRMENPROFIL-Abschnitt, 2-4 Saetze.",
+        required: ["name", "ampel", "begruendung"],
       },
     },
-    required: ["kriterien", "warnings", "no_go_hart", "swot", "fazit", "firmenbeschreibung_de"],
+    warnings: { type: "array", items: { type: "string" } },
+    no_go_hart: { type: "boolean" },
+    swot: {
+      type: "object",
+      properties: {
+        staerken: { type: "array", items: { type: "string" } },
+        schwaechen: { type: "array", items: { type: "string" } },
+        chancen: { type: "array", items: { type: "string" } },
+        risiken: { type: "array", items: { type: "string" } },
+      },
+      required: ["staerken", "schwaechen", "chancen", "risiken"],
+    },
+    fazit: { type: "string" },
+    firmenbeschreibung_de: {
+      type: "string",
+      description: "Sinngemaesse deutsche Uebersetzung der Firmenbeschreibung aus dem FIRMENPROFIL-Abschnitt, 2-4 Saetze.",
+    },
   },
-};
-
-// Ruft die echte Anthropic Messages API direkt per fetch auf (kein SDK-Import
-// noetig, funktioniert zuverlaessig in Deno). apiKey kommt vom Aufrufer -
-// der eigene, entschluesselte Claude-Key des jeweiligen Nutzers (siehe
-// _shared/userKeys.ts), kein globaler Service-Key mehr.
-//
-// tool_choice erzwingt den Aufruf von QUALITAETS_TOOL - Claude liefert die
-// Analyse damit als strukturiertes, schema-validiertes Objekt statt als
-// freien JSON-Text. Das verhindert Parse-Fehler durch unescapte
-// Anführungszeichen o.ae. in generierten Freitextfeldern (begruendung/
-// fazit/SWOT), die bei reinem Text-JSON-Parsing sonst die ganze Antwort
-// unbrauchbar machen konnten.
-export async function callClaude(model: string, userPrompt: string, apiKey: string) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 6000,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userPrompt }],
-      tools: [QUALITAETS_TOOL],
-      tool_choice: { type: "tool", name: QUALITAETS_TOOL_NAME },
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${text}`);
-  }
-  return await res.json(); // { content: [...], usage: {...}, model: "..." }
-}
+  required: ["kriterien", "warnings", "no_go_hart", "swot", "fazit", "firmenbeschreibung_de"],
+} as const;
 
 function ampelNum(s: string): number | null {
   if (s === "gruen") return 1;
@@ -178,29 +143,18 @@ function ampelNum(s: string): number | null {
   return 0;
 }
 
-export function parseClaudeResponse(claudeRaw: any) {
-  let claudeParsed: any = null;
-  let parseError: string | null = null;
-  try {
-    // Bei erzwungenem tool_choice liefert Anthropic das Ergebnis als
-    // bereits geparstes Objekt in content[].input (kein JSON.parse eines
-    // Freitext-Blocks mehr noetig, siehe callClaude()).
-    const toolBlock = (claudeRaw.content || []).find(
-      (c: any) => c.type === "tool_use" && c.name === "submit_qualitaetsanalyse",
-    );
-    if (!toolBlock) {
-      throw new Error("Kein tool_use-Block mit der erwarteten Analyse in der Claude-Antwort gefunden.");
-    }
-    claudeParsed = toolBlock.input;
-  } catch (e) {
-    parseError = (e as Error).message;
-  }
+// Providerneutrale Auswertung eines LlmToolResult - 1:1 die bisherige
+// Ampel-/Score-Rechenlogik aus parseClaudeResponse(), nur auf das
+// gemeinsame Zwischenformat (toolInput statt rohem Claude-JSON) umgestellt.
+export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) {
+  const claudeParsed = result.toolInput;
+  const parseError = claudeParsed ? null : result.rawError ?? "Kein gueltiger strukturierter Aufruf in der Modell-Antwort.";
 
   let scoreQualitaet: number | null = null;
   let qualitaetKriterien: any[] = [];
-  if (claudeParsed && Array.isArray(claudeParsed.kriterien)) {
+  if (claudeParsed && Array.isArray((claudeParsed as any).kriterien)) {
     let numerator = 0, denominator = 0;
-    qualitaetKriterien = claudeParsed.kriterien.map((k: any) => {
+    qualitaetKriterien = (claudeParsed as any).kriterien.map((k: any) => {
       const meta = QUAL_WEIGHTS[k.name] || { w: 1, optional: false };
       const a = ampelNum(k.ampel);
       if (a !== null) {
@@ -214,20 +168,13 @@ export function parseClaudeResponse(claudeRaw: any) {
     scoreQualitaet = denominator > 0 ? Math.round(Math.min(100, (numerator / denominator) * 100)) : null;
   }
 
-  const usage = claudeRaw.usage || {};
-  const tokensInput = usage.input_tokens || 0;
-  const tokensOutput = usage.output_tokens || 0;
-  const usedModel = claudeRaw.model || "claude-sonnet-5";
-  const rates = PRICING[usedModel] || PRICING["claude-sonnet-5"];
-  const costUsd = (tokensInput * rates.in + tokensOutput * rates.out) / 1_000_000;
-
   return {
     claudeParsed, parseError, scoreQualitaet, qualitaetKriterien,
-    tokensInput, tokensOutput, costUsd,
-    warnings: claudeParsed?.warnings || [],
-    fazit: claudeParsed?.fazit || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
-    swot: claudeParsed?.swot ?? null,
-    noGoHart: claudeParsed?.no_go_hart === true,
-    firmenbeschreibungDe: claudeParsed?.firmenbeschreibung_de || null,
+    tokensInput: result.tokensInput, tokensOutput: result.tokensOutput, costUsd: result.costUsd,
+    warnings: (claudeParsed as any)?.warnings || [],
+    fazit: (claudeParsed as any)?.fazit || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
+    swot: (claudeParsed as any)?.swot ?? null,
+    noGoHart: (claudeParsed as any)?.no_go_hart === true,
+    firmenbeschreibungDe: (claudeParsed as any)?.firmenbeschreibung_de || null,
   };
 }
