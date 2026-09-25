@@ -1,0 +1,13 @@
+-- Nutzerfeedback: Analyse-Detailseite zeigte bei Fehlschlag nur einen
+-- generischen Text ("ist ein Fehler aufgetreten"), die tatsaechliche
+-- Ursache (z.B. OpenRouter-Guardrail-Block, ungueltiger Modellname,
+-- Rate-Limit) stand nur im internen error_message/function_errors-Log.
+--
+-- error_message bleibt unveraendert die ROHE, teils anbieterinterne
+-- Fehlermeldung (z.B. volle OpenRouter-JSON-Bloecke inkl. Metadaten) -
+-- nicht 1:1 an Endnutzer zeigen. error_message_public ist die bereinigte,
+-- vom Backend klassifizierte Version (siehe analyse/index.ts,
+-- classifyErrorForUser()) - null, wenn der Fehler keiner bekannten
+-- Kategorie zugeordnet werden konnte (Frontend zeigt dann weiterhin den
+-- bisherigen generischen Fallback-Text).
+alter table stock_analyses add column if not exists error_message_public text;
