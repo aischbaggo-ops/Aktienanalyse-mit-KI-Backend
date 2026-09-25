@@ -93,6 +93,17 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
       throw new Error("FMP-API-Key ungültig oder abgelaufen.");
     }
     const scoreData = computeScores(fmpData);
+    if (!scoreData.profile) {
+      // FMP antwortet auf einen nicht existierenden/falsch geschriebenen
+      // Ticker mit HTTP 200 und einem LEEREN Array, nicht mit einem Fehler -
+      // ohne diese Pruefung lief die gesamte Berechnung unten mit lauter
+      // nulls einfach durch und landete als status:"done" mit leerem/
+      // unvollstaendigem Ergebnis statt als klar erkennbarer Fehlschlag
+      // (bekannter Fall: Junk-Ticker wie "WALLETUSD" oder "ZZZZ", siehe
+      // Pentest-Testfeedback). Bewusst hier abbrechen wie beim
+      // fmpAuthError-Fall oben.
+      throw new Error("Keine Profildaten bei FMP gefunden - Ticker existiert vermutlich nicht.");
+    }
 
     const stability = computeStabilityScore(
       fmpData.scores,
@@ -362,7 +373,27 @@ async function runAnalysis(ticker: string, logId: string, startedAt: number, fmp
     console.log(`[analyse] background run finished ticker=${ticker} logId=${logId} status=${result.status} durationMs=${Date.now() - startedAt}`);
   } catch (e) {
     console.error(`[analyse] background run FAILED ticker=${ticker} logId=${logId}:`, e);
-    await supabase.from("stock_analyses").update({ status: "error", error_message: (e as Error).message }).eq("ticker", ticker);
+    // Score/Kriterien/Fazit MIT zuruecksetzen, nicht nur status/error_message:
+    // stock_analyses ist eine pro-Ticker-Cache-Zeile, die bei einem erneuten
+    // Lauf per UPDATE (nicht INSERT) geschrieben wird - ohne dieses
+    // Zuruecksetzen blieb bei einem fehlgeschlagenen ERNEUTEN Lauf der Score
+    // eines FRUEHEREN erfolgreichen Laufs sichtbar stehen, obwohl status
+    // gleichzeitig "error" zeigte (reales Nutzerfeedback: NVDA zeigte Status
+    // "Fehler" UND Score 70 gleichzeitig in "Letzte Analysen"). status:"error"
+    // muss immer eindeutig "kein verwertbares Ergebnis" bedeuten.
+    await supabase.from("stock_analyses").update({
+      status: "error",
+      error_message: (e as Error).message,
+      score_total: null,
+      score_fundamental: null,
+      score_qualitaet: null,
+      score_krise: null,
+      score_trend: null,
+      score_stabilitaet: null,
+      criteria: null,
+      warnings: null,
+      fazit: null,
+    }).eq("ticker", ticker);
     await supabase.from("request_log").update({
       status: "error", duration_ms: Date.now() - startedAt, error_message: (e as Error).message,
     }).eq("id", logId);
