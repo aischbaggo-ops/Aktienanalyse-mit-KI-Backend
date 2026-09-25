@@ -21,6 +21,55 @@ const PROVIDER_LABELS: Record<LlmProvider, string> = {
 // Obergrenze fuer den Admin-Recherche-Kontext im Analyse-Prompt (Zeichen).
 const MAX_ADMIN_CONTEXT_CHARS = 8000;
 
+// Wandelt eine rohe Fehlermeldung (oft ein voller Anbieter-JSON-Block mit
+// internen Details/Metadaten, siehe z.B. die OpenRouter-Guardrail- oder
+// "not a valid model ID"-Fehler aus echtem Nutzerfeedback) in eine kurze,
+// verstaendliche deutsche Meldung fuer die Analyse-Detailseite um. Von uns
+// selbst geschriebene, bereits klare Meldungen (FMP-Key/Ticker-Faelle oben
+// in runAnalysis) werden unveraendert durchgereicht. Kein Treffer -> null,
+// Frontend zeigt dann den bisherigen generischen Fallback-Text.
+function classifyErrorForUser(rawMessage: string, provider: LlmProvider): string | null {
+  if (
+    rawMessage === "FMP-API-Key ungültig oder abgelaufen." ||
+    rawMessage.startsWith("Keine Profildaten bei FMP gefunden")
+  ) {
+    return rawMessage;
+  }
+
+  const msg = rawMessage.toLowerCase();
+  const label = PROVIDER_LABELS[provider];
+
+  if (msg.includes("guardrail")) {
+    return `Das gewählte Modell (${label}) wurde durch eine Guardrail-Einstellung deines ${label}-Kontos blockiert. Bitte prüfe die Einstellungen bei deinem Anbieter oder wähle ein anderes Modell.`;
+  }
+  if (
+    msg.includes("not a valid model id") ||
+    msg.includes("no endpoints found") ||
+    msg.includes("model_not_found") ||
+    (msg.includes("model") && msg.includes("does not exist"))
+  ) {
+    return `Der hinterlegte Modellname ist bei ${label} nicht gültig. Bitte prüfe den Modellnamen in den Kontoeinstellungen.`;
+  }
+  if (
+    msg.includes("401") ||
+    msg.includes("authentication_error") ||
+    msg.includes("invalid x-api-key") ||
+    msg.includes("invalid api key") ||
+    msg.includes("api key not valid") ||
+    msg.includes("incorrect api key")
+  ) {
+    return `Der hinterlegte ${label}-API-Key ist ungültig oder abgelaufen. Bitte aktualisiere ihn in den Kontoeinstellungen.`;
+  }
+  if (msg.includes("429") || msg.includes("rate limit") || msg.includes("rate_limit")) {
+    return `${label} hat die Anfrage wegen eines Rate-Limits abgelehnt. Bitte versuche es in ein paar Minuten erneut.`;
+  }
+  if (msg.includes("json") && (msg.includes("unterminated") || msg.includes("unexpected") || msg.includes("expected"))) {
+    return `Die Antwort von ${label} konnte nicht verarbeitet werden (fehlerhaftes Format). Bitte versuche es erneut.`;
+  }
+
+  return null;
+}
+
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -368,6 +417,11 @@ async function runAnalysis(
       },
       data_source: dataSource,
       error_message: parsed.parseError,
+      // Bewusst immer null setzen (nicht nur bei Erfolg unveraendert lassen) -
+      // sonst wuerde eine oeffentliche Fehlermeldung aus einem FRUEHEREN
+      // fehlgeschlagenen Lauf nach einem erfolgreichen Retry auf demselben
+      // Ticker stehen bleiben.
+      error_message_public: null,
     };
 
     await supabase.from("stock_analyses").update(result).eq("ticker", ticker);
@@ -413,6 +467,7 @@ async function runAnalysis(
     await supabase.from("stock_analyses").update({
       status: "error",
       error_message: (e as Error).message,
+      error_message_public: classifyErrorForUser((e as Error).message, provider),
       score_total: null,
       score_fundamental: null,
       score_qualitaet: null,
