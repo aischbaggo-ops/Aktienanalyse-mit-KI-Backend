@@ -120,7 +120,7 @@ export function computeScores(d: any) {
   {
     const a = stabilityOrRisingAmpel(operatingMargin);
     addF("Operative Marge konstant oder steigend", "Streng", 2, a,
-      `Marge-Verlauf ueber ${operatingMargin.filter((x) => x !== null).length} Jahre.`);
+      `Marge-Verlauf ueber ${operatingMargin.filter((x: number | null) => x !== null).length} Jahre.`);
   }
   {
     const roicSeries = incomeRaw.map((r: any, i: number) => {
@@ -681,6 +681,8 @@ export function computePrognose(d: any, currentPrice: number | null, sharesOut: 
   if (!target || !currentPrice || !sharesOut) {
     return { verfuegbar: false, hinweis: "Prognose nicht berechenbar (Analysten-Schaetzungen, Kurs oder Aktienzahl fehlen)." };
   }
+  // TS verliert die Null-Pruefung oben innerhalb von scenario() (Closure).
+  const price: number = currentPrice;
 
   // EINMALIGER Diagnose-Log (Runde 2): prueft, ob speziell die am weitesten
   // entfernte Schaetzzeile (target) bei epsAvg/ebitdaAvg echte Zahlen oder
@@ -707,8 +709,8 @@ export function computePrognose(d: any, currentPrice: number | null, sharesOut: 
     const ziel = zielKgv !== null && zielKcv !== null ? (zielKgv + zielKcv) / 2
       : zielKgv ?? zielKcv ?? null;
     if (ziel === null) return null;
-    const jahresrendite = Math.pow(ziel / currentPrice, 1 / jahre) - 1;
-    const gesamtrendite = ziel / currentPrice - 1;
+    const jahresrendite = Math.pow(ziel / price, 1 / jahre) - 1;
+    const gesamtrendite = ziel / price - 1;
     const fairValueHeute = ziel / Math.pow(1.10, jahre);
     return {
       ziel: Math.round(ziel * 100) / 100,
