@@ -1,5 +1,6 @@
 import { corsHeaders } from "../_shared/cors.ts";
 import { logAppEvent, type AppEventStatus } from "../_shared/appEvents.ts";
+import { checkIpRateLimit } from "../_shared/rateLimit.ts";
 
 // Oeffentlicher Endpoint (KEIN Login noetig, verify_jwt=false wie analyse/
 // symbol-search) - genau die "stillen" Fehlschlaege, die dieses Log sichtbar
@@ -26,6 +27,15 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  // IP-basiertes Rate-Limit, da dieser Endpoint bewusst ohne Auth-Check ist
+  // (siehe Kommentar oben) - siehe _shared/rateLimit.ts fuer Details/Grund.
+  if (!(await checkIpRateLimit(req))) {
+    return new Response(JSON.stringify({ error: "Zu viele Anfragen. Bitte kurz warten." }), {
+      status: 429,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
