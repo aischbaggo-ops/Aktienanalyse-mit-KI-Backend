@@ -38,8 +38,8 @@ Deno.serve(async (req) => {
 
   const body = await req.json().catch(() => ({}));
   const tickersRaw = Array.isArray(body.tickers) ? body.tickers : [];
-  const tickers = [
-    ...new Set(
+  const tickers: string[] = [
+    ...new Set<string>(
       tickersRaw
         .map((t: unknown) => String(t).trim().toUpperCase())
         .filter((t: string) => t.length > 0),
