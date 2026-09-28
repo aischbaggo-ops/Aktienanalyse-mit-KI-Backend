@@ -8,6 +8,17 @@ import { CLAUDE_PRICING as PRICING } from "../_shared/llm/pricing.ts";
 
 const CHAT_MODEL = "claude-sonnet-5";
 
+// Bugfix 2026-09-28: der Prompt "teile ein in 10 bloecke mit jeweils 50
+// tickern" (reines Sortieren/Formatieren bereits vorliegender Daten)
+// fuehrte zweimal zu leerem Content, weil Claude unnoetig web_search
+// nutzte und dabei das max_tokens-Budget vor der eigentlichen Textantwort
+// aufbrauchte (beide Faelle exakt tokens_output=4096, tokens_input
+// 29k/33k - siehe api_call_log). Bisher gab es GAR KEINEN System-Prompt
+// fuer diesen Call. Diese eine Regel reicht, um das Modell von unnoetiger
+// Suche abzuhalten, ohne echte Recherche-Faehigkeit einzuschraenken.
+const SYSTEM_PROMPT =
+  "Nutze web_search NUR, wenn die Antwort aktuelle, externe Informationen braucht, die nicht bereits im Gespraech oder in den bereitgestellten App-Daten vorliegen. Fuer Aufgaben wie Sortieren, Formatieren, Aufteilen oder Umrechnen von bereits gegebenen Daten (z.B. einer Ticker-Liste) NIE web_search verwenden - das kostet unnoetig Zeit und Token-Budget.";
+
 // Harte Obergrenze pro Anfrage, unabhaengig vom Frontend - begrenzt die
 // maximalen Kosten EINES einzelnen Turns, falls Claude sich in einer
 // Recherche "verrennt". Anthropic-Richtwert: einfache Faktenfragen
@@ -88,7 +99,13 @@ Deno.serve(async (req) => {
       },
       body: JSON.stringify({
         model: CHAT_MODEL,
-        max_tokens: 4096,
+        // War 4096 - Bugfix 2026-09-28 (siehe SYSTEM_PROMPT-Kommentar
+        // oben). Sicherheitsnetz zusaetzlich zur Such-Einschraenkung, kein
+        // Ersatz dafuer: auch ohne unnoetige Suche kann eine wirklich
+        // lange Antwort (z.B. eine ausformulierte 500-Ticker-Liste in 10
+        // Bloecken) das Budget beanspruchen.
+        max_tokens: 8192,
+        system: SYSTEM_PROMPT,
         messages,
         // web_search_20250305: Basis-Websuche, serverseitig von Anthropic
         // ausgefuehrt - kein eigener Such-Provider noetig. Anthropic macht
@@ -123,6 +140,7 @@ Deno.serve(async (req) => {
   const tokensInput = usage.input_tokens || 0;
   const tokensOutput = usage.output_tokens || 0;
   const webSearchCount = usage.server_tool_use?.web_search_requests || 0;
+  const stopReason: string | null = claudeRaw.stop_reason ?? null;
   const rates = PRICING[CHAT_MODEL] || PRICING["claude-sonnet-5"];
   const costUsd =
     (tokensInput * rates.in + tokensOutput * rates.out) / 1_000_000 + webSearchCount * WEB_SEARCH_COST_PER_USE;
@@ -136,6 +154,7 @@ Deno.serve(async (req) => {
     tokensInput,
     tokensOutput,
     costUsd,
+    stopReason,
   });
 
   return new Response(
@@ -153,6 +172,10 @@ Deno.serve(async (req) => {
       tokens_output: tokensOutput,
       web_search_count: webSearchCount,
       cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
+      // Bugfix 2026-09-28: dem Frontend erlauben, einen durch max_tokens
+      // abgeschnittenen (leeren) Content klar von einer echten leeren
+      // Antwort zu unterscheiden - siehe AdminChatPage.tsx.
+      stop_reason: stopReason,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );

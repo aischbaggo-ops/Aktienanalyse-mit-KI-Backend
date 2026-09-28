@@ -16,6 +16,10 @@ export interface ApiCallLogEntry {
   tokensOutput?: number | null;
   costUsd?: number | null;
   errorMessage?: string | null;
+  // Nur bei LLM-Providern gesetzt (z.B. "end_turn", "max_tokens",
+  // "tool_use") - Diagnose-Signal fuer abgeschnittene Antworten, siehe
+  // migrations/20260928100000_add_stop_reason_to_api_call_log.sql.
+  stopReason?: string | null;
 }
 
 // Granulares Tracking JEDES einzelnen FMP-/LLM-API-Calls (nicht nur
@@ -37,6 +41,7 @@ export async function logApiCall(entry: ApiCallLogEntry): Promise<void> {
       tokens_output: entry.tokensOutput ?? null,
       cost_usd: entry.costUsd ?? null,
       error_message: entry.errorMessage ?? null,
+      stop_reason: entry.stopReason ?? null,
     });
   } catch (e) {
     console.error("[logApiCall] failed:", (e as Error).message);
