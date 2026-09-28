@@ -7,6 +7,16 @@ import { loadUserApiKeys, loadActiveLlmKey } from "../_shared/userKeys.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
+import { checkUserRateLimit } from "../_shared/rateLimit.ts";
+
+// Rate-Limit fuer neue Analyse-Laeufe (Audit M10 / urspruenglich Pentest-
+// Scratchpad M1). BEWUSST hoeher als der dort genannte Beispielwert
+// (20/Stunde): das Batch-Auswahl-Feature erlaubt bis zu 100 Ticker in
+// einem einzigen Lauf - 20/Stunde wuerde jeden Batch-Lauf ueber 20 nicht
+// gecachte Ticker mitten im Lauf mit 429 abbrechen. 120 laesst einen
+// vollen 100er-Batch plus etwas Spielraum fuer normale Einzelanalysen in
+// derselben Stunde zu.
+const MAX_ANALYSES_PER_HOUR = 120;
 
 // Anzeigename je Anbieter fuer Fehlermeldungen - gleiche Bezeichnungen wie
 // im Frontend (KontoPage: "Claude (Standard) / ChatGPT / Gemini /
@@ -553,6 +563,19 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ source: "cache", ticker, analysis: existing }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // Rate-Limit NUR fuer echte neue Laeufe (Audit M10) - ein Cache-Treffer
+  // oben verbraucht kein FMP-/Claude-Kontingent und zaehlt deshalb bewusst
+  // nicht mit. Schuetzt vor versehentlichem oder absichtlichem Ueberlasten
+  // des eigenen FMP-Tageskontingents/der Claude-Kosten durch wiederholte
+  // force_refresh-Aufrufe, nicht primaer vor fremden Nutzern (die sowieso
+  // ihren eigenen Key brauchen).
+  if (!(await checkUserRateLimit(user_id, "analyse", MAX_ANALYSES_PER_HOUR))) {
+    return new Response(
+      JSON.stringify({ error: `Zu viele neue Analysen (max. ${MAX_ANALYSES_PER_HOUR}/Stunde). Bitte spaeter erneut versuchen.` }),
+      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   // Eigene Keys laden, BEVOR irgendetwas in der DB angelegt/veraendert wird
