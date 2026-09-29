@@ -1,0 +1,15 @@
+-- Audit L7 / urspruenglich Pentest-Scratchpad M3: username_available() war
+-- an "anon, authenticated" vergeben (Migration 20260921100000) - erlaubte
+-- Username-Enumeration auch ohne Login.
+--
+-- WICHTIG, Korrektur gegenueber dem urspruenglichen Pentest-Scratchpad-Fix
+-- (der nur "revoke ... from anon" vorsah): Live geprueft (2026-09-28) hat
+-- die Funktion ZUSAETZLICH ein EXECUTE-Recht fuer PUBLIC - das ist
+-- Postgres' Default fuer neu angelegte Funktionen, kommt hier NICHT aus
+-- einem expliziten GRANT (die urspruengliche Migration vergibt nur an
+-- "anon, authenticated"). Rechte sind additiv: ein alleiniges
+-- "revoke ... from anon" haette anon NICHT wirklich ausgeschlossen, da
+-- anon weiterhin ueber den PUBLIC-Grant haette ausfuehren koennen. Daher
+-- hier zusaetzlich "from public". REVOKE ist idempotent (kein Fehler,
+-- falls ein Recht bereits entzogen ist).
+revoke execute on function username_available(text) from public, anon;

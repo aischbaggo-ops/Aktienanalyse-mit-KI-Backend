@@ -5,6 +5,12 @@ import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { CLAUDE_PRICING as PRICING } from "../_shared/llm/pricing.ts";
+import { checkUserRateLimit } from "../_shared/rateLimit.ts";
+
+// Audit M10 / urspruenglich Pentest-Scratchpad M1 - eigener Richtwert
+// (kostenpflichtig durch Claude + Websuche, aber nur fuer Admins
+// erreichbar, daher grosszuegiger als symbol-search).
+const MAX_CHATS_PER_HOUR = 30;
 
 const CHAT_MODEL = "claude-sonnet-5";
 
@@ -66,6 +72,15 @@ Deno.serve(async (req) => {
       status: admin.status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // Rate-Limit (Audit M10) - vor dem Claude-Call, damit ein ueberzogenes
+  // Limit auch tatsaechlich die Kosten spart.
+  if (!(await checkUserRateLimit(userId, "admin-chat", MAX_CHATS_PER_HOUR))) {
+    return new Response(
+      JSON.stringify({ error: `Zu viele Chat-Anfragen (max. ${MAX_CHATS_PER_HOUR}/Stunde). Bitte spaeter erneut versuchen.` }),
+      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   const body = await req.json().catch(() => ({}));
