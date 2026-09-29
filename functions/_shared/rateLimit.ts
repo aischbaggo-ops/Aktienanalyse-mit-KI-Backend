@@ -34,3 +34,26 @@ export async function checkIpRateLimit(req: Request, limit = 30): Promise<boolea
     return true;
   }
 }
+
+// Grosszuegiges User-Rate-Limit fuer Endpoints MIT Auth-Check (analyse,
+// symbol-search, admin-chat) - siehe
+// migrations/20260928092000_add_user_rate_limit.sql fuer den atomaren
+// Check-and-Increment in der DB (Stunden-Buckets, eine Tabelle/Funktion fuer
+// alle drei ueber die "scope"-Spalte statt einer separaten Kopie je
+// Function). Faellt wie checkIpRateLimit() bei DB-Fehlern bewusst offen -
+// das Limit schuetzt vor versehentlichem/absichtlichem Ueberlasten des
+// eigenen FMP-/Claude-Kontingents, ist keine harte Sicherheitsgrenze.
+export async function checkUserRateLimit(userId: string, scope: string, limit: number): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.rpc("check_user_rate_limit", {
+      p_user_id: userId,
+      p_scope: scope,
+      p_limit: limit,
+    });
+    if (error) throw error;
+    return data !== false;
+  } catch (e) {
+    console.error(`[checkUserRateLimit] scope=${scope} failed, failing open:`, (e as Error).message);
+    return true;
+  }
+}

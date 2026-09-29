@@ -3,12 +3,19 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
+import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
+
+// Audit M10 / urspruenglich Pentest-Scratchpad M1 - eigener Richtwert, im
+// Auftrag nicht vorgegeben. 60/Stunde ist grosszuegiger als bei analyse
+// (jede Sucheingabe im Frontend loest einen Call aus, auch Tippen mehrerer
+// Buchstaben nacheinander).
+const MAX_SEARCHES_PER_HOUR = 60;
 
 interface SearchResult {
   symbol: string;
@@ -131,6 +138,16 @@ Deno.serve(async (req) => {
 
   if (!query) {
     return new Response(JSON.stringify({ results: [], rate_limited: false }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  // Rate-Limit (Audit M10) - VOR den FMP-Calls, damit ein ueberzogenes
+  // Limit auch tatsaechlich den externen Aufruf spart, nicht nur die
+  // Antwort.
+  if (!(await checkUserRateLimit(userId, "symbol-search", MAX_SEARCHES_PER_HOUR))) {
+    return new Response(JSON.stringify({ error: `Zu viele Suchanfragen (max. ${MAX_SEARCHES_PER_HOUR}/Stunde). Bitte kurz warten.` }), {
+      status: 429,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
