@@ -1,0 +1,13 @@
+-- admin-chat-Bugfix (2026-09-28): zwei aufeinanderfolgende Aufrufe
+-- brachen mit leerem Content zurueck ("keine Textantwort erhalten" im
+-- Frontend-Fallback), beide mit tokens_output genau am max_tokens-Limit
+-- (4096) und ungewoehnlich hohen tokens_input (29k/33k) - starkes Indiz
+-- fuer unnoetige web_search-Nutzung, die das Token-Budget vor der
+-- eigentlichen Textantwort aufgebraucht hat. api_call_log speicherte
+-- bisher keinen stop_reason, die Diagnose musste ueber die reinen
+-- Token-Zahlen erfolgen. Fuer kuenftige Faelle direkt sichtbar machen.
+--
+-- Reiner String aus der Anthropic-Antwort (z.B. "end_turn", "max_tokens",
+-- "tool_use") - keine Rohantwort, kein zusaetzliches Datenschutz-/
+-- Speicherthema gegenueber den bereits gespeicherten Token-Zahlen.
+alter table api_call_log add column if not exists stop_reason text;
