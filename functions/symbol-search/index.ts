@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { corsHeaders } from "../_shared/cors.ts";
+import { corsFor } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
@@ -120,6 +120,7 @@ function markPrimary(results: SearchResult[]): (SearchResult & { isPrimary: bool
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
   }

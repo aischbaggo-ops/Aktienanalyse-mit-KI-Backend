@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { corsHeaders } from "../_shared/cors.ts";
+import { corsFor } from "../_shared/cors.ts";
 import { computeScores, computeStabilityScore, computePrognose, computeValuation, computeAnalystConsensus, computeBankRatings, ampelLabel, arr, first } from "../_shared/scoring.ts";
 import { buildUserPrompt, callLLM, parseAnalysisResult, SYSTEM_PROMPT, type LlmProvider } from "../_shared/llm/index.ts";
 import { verifyUser } from "../_shared/auth.ts";
@@ -500,6 +500,7 @@ async function runAnalysis(
 
 // ---------- HTTP-Handler ----------
 Deno.serve(async (req) => {
+  const corsHeaders = corsFor(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers: corsHeaders });
