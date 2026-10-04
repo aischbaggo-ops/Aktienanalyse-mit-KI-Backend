@@ -1,4 +1,4 @@
-import { corsHeaders } from "../_shared/cors.ts";
+import { corsFor } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
@@ -48,6 +48,7 @@ interface ChatMessage {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsFor(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {

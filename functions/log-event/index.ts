@@ -1,4 +1,4 @@
-import { corsHeaders } from "../_shared/cors.ts";
+import { corsFor } from "../_shared/cors.ts";
 import { logAppEvent, type AppEventStatus } from "../_shared/appEvents.ts";
 import { checkIpRateLimit } from "../_shared/rateLimit.ts";
 
@@ -23,6 +23,7 @@ const ALLOWED_STATUS = new Set(["ok", "failed", "suspicious"]);
 const MAX_DETAILS_CHARS = 2000;
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsFor(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
