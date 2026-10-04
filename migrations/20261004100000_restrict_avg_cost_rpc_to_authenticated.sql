@@ -1,0 +1,11 @@
+-- Audit T-H2 (Nachpruefung aller SECURITY DEFINER-Funktionen, 04.10.2026):
+-- get_avg_recent_analysis_cost() hat in 20260924120000 nur "grant ... to
+-- authenticated" bekommen, aber nie ein Revoke vom Default-PUBLIC-Grant -
+-- Postgres vergibt EXECUTE standardmaessig an PUBLIC, und Supabase gibt es
+-- darueber auch an anon weiter. Live bestaetigt: der Aufruf per REST mit dem
+-- oeffentlichen Anon-Key lieferte HTTP 200 und den Kostendurchschnitt der
+-- letzten 20 Analysen, obwohl stock_analyses_costs admin-only ist.
+--
+-- Einziger Aufrufer ist useBatchAnalysis (Frontend, eingeloggte Nutzer) -
+-- authenticated und service_role bleiben unveraendert berechtigt.
+revoke execute on function get_avg_recent_analysis_cost() from public, anon;
