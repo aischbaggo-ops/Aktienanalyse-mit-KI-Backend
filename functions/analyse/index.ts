@@ -6,6 +6,8 @@ import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys, loadActiveLlmKey } from "../_shared/userKeys.ts";
 import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
+import { logAppEvent } from "../_shared/appEvents.ts";
+import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
@@ -259,6 +261,8 @@ async function runAnalysis(
       tokensOutput: parsed.tokensOutput,
       costUsd: parsed.costUsd,
       errorMessage: parsed.parseError,
+      stopReason: llmResult.stopReason,
+      model: llmResult.responseModel,
     });
 
     const scoreFundamental = scoreData.fundamental.score;
@@ -286,6 +290,31 @@ async function runAnalysis(
     ];
     if (scoreQualitaet === null && !parsed.parseError) {
       console.warn(`[analyse] LLM call succeeded but scoreQualitaet is null for ${ticker} — kriterien may be missing from tool_use input`);
+    }
+    const anomaly = detectLlmAnomaly({
+      ticker,
+      provider,
+      callType: "qualitaet-analyse",
+      model: llmResult.responseModel ?? llmModel,
+      stopReason: llmResult.stopReason ?? null,
+      toolInput: llmResult.toolInput,
+      scoreQualitaet,
+      missingScoreParts: listMissingScoreParts({
+        fundamental: scoreFundamental,
+        qualitaet: scoreQualitaet,
+        krise: scoreKrise,
+        trend: scoreTrend,
+      }),
+      parseError: parsed.parseError,
+    });
+    if (anomaly) {
+      await logAppEvent({
+        eventType: "llm_output_anomaly",
+        functionName: "analyse",
+        status: "suspicious",
+        userId,
+        details: anomaly.details,
+      });
     }
     let warnings = [...scoreData.warningsNumerisch, ...parsed.warnings];
     let tokensInput = parsed.tokensInput, tokensOutput = parsed.tokensOutput, costUsd = parsed.costUsd;
@@ -343,7 +372,34 @@ async function runAnalysis(
         tokensOutput: parsed2.tokensOutput,
         costUsd: parsed2.costUsd,
         errorMessage: parsed2.parseError,
+        stopReason: llmResult2.stopReason,
+        model: llmResult2.responseModel,
       });
+      const anomaly2 = detectLlmAnomaly({
+        ticker,
+        provider,
+        callType: "qualitaet-analyse-kontrolle",
+        model: llmResult2.responseModel ?? controlModel,
+        stopReason: llmResult2.stopReason ?? null,
+        toolInput: llmResult2.toolInput,
+        scoreQualitaet: parsed2.scoreQualitaet,
+        missingScoreParts: listMissingScoreParts({
+          fundamental: scoreFundamental,
+          qualitaet: parsed2.scoreQualitaet,
+          krise: scoreKrise,
+          trend: scoreTrend,
+        }),
+        parseError: parsed2.parseError,
+      });
+      if (anomaly2) {
+        await logAppEvent({
+          eventType: "llm_output_anomaly",
+          functionName: "analyse",
+          status: "suspicious",
+          userId,
+          details: anomaly2.details,
+        });
+      }
       const scoreQualitaet2 = parsed2.scoreQualitaet ?? scoreQualitaet;
       let scoreTotal2 = scoreTotal;
       if ([scoreFundamental, scoreQualitaet2, scoreKrise, scoreTrend].every((x) => typeof x === "number")) {
