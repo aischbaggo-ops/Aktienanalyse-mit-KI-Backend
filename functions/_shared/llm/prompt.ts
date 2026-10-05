@@ -143,6 +143,27 @@ function ampelNum(s: string): number | null {
   return 0;
 }
 
+function extractEmbeddedFields(input: any): {
+  kriterien?: any[];
+  cleanFazit?: string;
+  firmenbeschreibungDe?: string;
+} {
+  const fazit = input?.fazit;
+  if (typeof fazit !== "string" || !fazit.includes("<parameter")) return {};
+  const result: Record<string, any> = {};
+  const fazitEnd = fazit.indexOf("</fazit>");
+  const paramStart = fazit.indexOf("<parameter");
+  if (fazitEnd >= 0) result.cleanFazit = fazit.substring(0, fazitEnd).trim();
+  else if (paramStart >= 0) result.cleanFazit = fazit.substring(0, paramStart).trim();
+  const kriterienMatch = fazit.match(/<parameter\s+name="kriterien">\s*(\[[\s\S]*\])\s*(?:<\/|$)/);
+  if (kriterienMatch) {
+    try { result.kriterien = JSON.parse(kriterienMatch[1]); } catch { /* ignore */ }
+  }
+  const firmenMatch = fazit.match(/<parameter\s+name="firmenbeschreibung_de">([\s\S]*?)<\/firmenbeschreibung_de>/);
+  if (firmenMatch) result.firmenbeschreibungDe = firmenMatch[1].trim();
+  return result;
+}
+
 // Providerneutrale Auswertung eines LlmToolResult - 1:1 die bisherige
 // Ampel-/Score-Rechenlogik aus parseClaudeResponse(), nur auf das
 // gemeinsame Zwischenformat (toolInput statt rohem Claude-JSON) umgestellt.
@@ -150,11 +171,25 @@ export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) 
   const claudeParsed = result.toolInput;
   const parseError = claudeParsed ? null : result.rawError ?? "Kein gueltiger strukturierter Aufruf in der Modell-Antwort.";
 
+  let kriterien: any[] | undefined = Array.isArray((claudeParsed as any)?.kriterien)
+    ? (claudeParsed as any).kriterien
+    : undefined;
+  let fazitRaw: string | null = (claudeParsed as any)?.fazit ?? null;
+  let firmenRaw: string | null = (claudeParsed as any)?.firmenbeschreibung_de ?? null;
+
+  const embedded = claudeParsed && !kriterien ? extractEmbeddedFields(claudeParsed) : {};
+  if (!kriterien && embedded.kriterien) {
+    kriterien = embedded.kriterien;
+    console.warn("[parseAnalysisResult] kriterien recovered from embedded XML in fazit");
+  }
+  if (embedded.cleanFazit) fazitRaw = embedded.cleanFazit;
+  if (!firmenRaw && embedded.firmenbeschreibungDe) firmenRaw = embedded.firmenbeschreibungDe;
+
   let scoreQualitaet: number | null = null;
   let qualitaetKriterien: any[] = [];
-  if (claudeParsed && Array.isArray((claudeParsed as any).kriterien)) {
+  if (claudeParsed && Array.isArray(kriterien)) {
     let numerator = 0, denominator = 0;
-    qualitaetKriterien = (claudeParsed as any).kriterien.map((k: any) => {
+    qualitaetKriterien = kriterien.map((k: any) => {
       const meta = QUAL_WEIGHTS[k.name] || { w: 1, optional: false };
       const a = ampelNum(k.ampel);
       if (a !== null) {
@@ -172,9 +207,9 @@ export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) 
     claudeParsed, parseError, scoreQualitaet, qualitaetKriterien,
     tokensInput: result.tokensInput, tokensOutput: result.tokensOutput, costUsd: result.costUsd,
     warnings: (claudeParsed as any)?.warnings || [],
-    fazit: (claudeParsed as any)?.fazit || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
+    fazit: fazitRaw || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
     swot: (claudeParsed as any)?.swot ?? null,
     noGoHart: (claudeParsed as any)?.no_go_hart === true,
-    firmenbeschreibungDe: (claudeParsed as any)?.firmenbeschreibung_de || null,
+    firmenbeschreibungDe: firmenRaw,
   };
 }
