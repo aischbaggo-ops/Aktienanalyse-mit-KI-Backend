@@ -19,6 +19,11 @@ export interface LlmToolResult {
   costUsd: number;
   // Nur gesetzt, wenn toolInput null ist - Klartext-Grund fuer Logging.
   rawError?: string;
+  // Reine Diagnose-Felder fuer api_call_log/app_events, beeinflussen weder
+  // Parser noch Score. Aktuell nur vom Claude-Adapter befuellt (stop_reason
+  // und das von der API gemeldete Modell, raw.model).
+  stopReason?: string | null;
+  responseModel?: string | null;
 }
 
 export interface CallLlmParams {

@@ -1,0 +1,13 @@
+-- LLM-Diagnose-Logging (Nachfolge T-M7): das von der LLM-API tatsaechlich
+-- gemeldete Modell (Anthropic: raw.model) je Call. Der Code speichert bisher
+-- nur das angefragte bzw. Default-Modell nirgends - bei einem Modellwechsel
+-- (z.B. claude-sonnet-5 -> claude-sonnet-5-5) waere sonst nicht
+-- nachvollziehbar, mit welchem Modell ein auffaelliger Lauf entstand.
+--
+-- Reiner String, keine Rohantwort. Nur bei LLM-Calls gesetzt, FMP-Zeilen
+-- bleiben NULL. Reihenfolge beim Rollout: ERST diese Migration, DANN die
+-- Functions deployen - fehlt die Spalte beim Deploy, schreibt logApiCall()
+-- den Eintrag nach einem fehlgeschlagenen ersten Versuch ohne Modell
+-- (siehe _shared/apiCallLog.ts), es geht also nichts verloren, nur das
+-- Modell fehlt und jeder LLM-Call kostet einen zusaetzlichen Insert.
+alter table api_call_log add column if not exists model text;

@@ -69,5 +69,7 @@ export async function callClaude(
     tokensOutput,
     costUsd,
     rawError: toolBlock ? undefined : "Kein tool_use-Block mit der erwarteten Analyse in der Claude-Antwort gefunden.",
+    stopReason: raw.stop_reason ?? null,
+    responseModel: raw.model ?? null,
   };
 }
