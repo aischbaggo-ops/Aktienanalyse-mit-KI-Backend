@@ -377,8 +377,21 @@ async function runAnalysis(
       costUsd += parsed2.costUsd;
     }
 
+    const missingScoreParts = scoreTotal === null
+      ? [
+          scoreFundamental === null ? "Fundamental" : null,
+          scoreQualitaet === null ? "Qualitaet" : null,
+          scoreKrise === null ? "Krise" : null,
+          scoreTrend === null ? "Trend" : null,
+        ].filter(Boolean)
+      : [];
+    const isComplete = scoreTotal !== null;
+    if (!isComplete) {
+      console.warn(`[analyse] score_total is null for ${ticker}, missing: ${missingScoreParts.join(", ")} — marking as error instead of done`);
+    }
+
     const result = {
-      status: "done",
+      status: isComplete ? "done" : "error",
       company_name: scoreData.profile?.companyName ?? null,
       sector: scoreData.profile?.sector ?? null,
       currency: scoreData.profile?.currency ?? null,
@@ -426,12 +439,10 @@ async function runAnalysis(
         },
       },
       data_source: dataSource,
-      error_message: parsed.parseError,
-      // Bewusst immer null setzen (nicht nur bei Erfolg unveraendert lassen) -
-      // sonst wuerde eine oeffentliche Fehlermeldung aus einem FRUEHEREN
-      // fehlgeschlagenen Lauf nach einem erfolgreichen Retry auf demselben
-      // Ticker stehen bleiben.
-      error_message_public: null,
+      error_message: parsed.parseError || (isComplete ? null : `Gesamtscore nicht berechenbar (fehlend: ${missingScoreParts.join(", ")}).`),
+      error_message_public: isComplete
+        ? null
+        : "Die Analyse konnte nicht vollständig berechnet werden. Bitte versuche es erneut.",
     };
 
     await supabase.from("stock_analyses").update(result).eq("ticker", ticker);
@@ -551,7 +562,7 @@ Deno.serve(async (req) => {
   const existing = existingRows?.[0] ?? null;
 
   let isFresh = false;
-  if (existing && existing.status === "done" && !force_refresh) {
+  if (existing && existing.status === "done" && existing.score_total != null && !force_refresh) {
     const ageMs = Date.now() - new Date(existing.updated_at).getTime();
     isFresh = ageMs <= max_age_days * 24 * 60 * 60 * 1000;
   }
