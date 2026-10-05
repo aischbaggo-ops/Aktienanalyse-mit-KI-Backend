@@ -53,7 +53,8 @@ export async function logApiCall(entry: ApiCallLogEntry): Promise<void> {
       error_message: entry.errorMessage ?? null,
       stop_reason: entry.stopReason ?? null,
     };
-    // supabase-js wirft bei DB-Fehlern nicht, sondern liefert {error}.
+    // supabase-js wirft bei DB-Fehlern nicht, sondern liefert {error}. Nur
+    // code + message loggen, NIE error.details (kann die ganze Zeile enthalten).
     const logInsertError = (error: { code?: string; message?: string } | null) => {
       if (error) console.error("[logApiCall] insert failed:", error.code, error.message);
     };

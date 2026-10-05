@@ -32,6 +32,9 @@ export async function logAppEvent(params: {
     // supabase-js wirft bei einem DB-Fehler nicht, sondern liefert {error} -
     // ohne diese Zeile ginge ein abgelehnter Insert (z.B. CHECK-Verstoss)
     // spurlos verloren.
+    // Nur code + message loggen, NIE error.details oder das ganze Objekt: bei
+    // Constraint-Verletzungen enthaelt details die komplette Zeile ("Failing
+    // row contains ...") und damit das rohe toolInput.
     if (error) console.error("[logAppEvent] insert failed:", params.eventType, error.code, error.message);
   } catch (e) {
     console.error("[logAppEvent] failed:", (e as Error).message);
