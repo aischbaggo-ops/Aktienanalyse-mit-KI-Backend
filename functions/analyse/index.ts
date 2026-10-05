@@ -284,6 +284,9 @@ async function runAnalysis(
           : "Kennzahl: " + (k.wert?.toFixed ? k.wert.toFixed(3) : k.wert ?? "n/a"),
       })),
     ];
+    if (scoreQualitaet === null && !parsed.parseError) {
+      console.warn(`[analyse] LLM call succeeded but scoreQualitaet is null for ${ticker} — kriterien may be missing from tool_use input`);
+    }
     let warnings = [...scoreData.warningsNumerisch, ...parsed.warnings];
     let tokensInput = parsed.tokensInput, tokensOutput = parsed.tokensOutput, costUsd = parsed.costUsd;
 
