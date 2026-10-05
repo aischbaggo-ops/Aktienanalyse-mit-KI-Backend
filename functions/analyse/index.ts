@@ -291,30 +291,36 @@ async function runAnalysis(
     if (scoreQualitaet === null && !parsed.parseError) {
       console.warn(`[analyse] LLM call succeeded but scoreQualitaet is null for ${ticker} — kriterien may be missing from tool_use input`);
     }
-    const anomaly = detectLlmAnomaly({
-      ticker,
-      provider,
-      callType: "qualitaet-analyse",
-      model: llmResult.responseModel ?? llmModel,
-      stopReason: llmResult.stopReason ?? null,
-      toolInput: llmResult.toolInput,
-      scoreQualitaet,
-      missingScoreParts: listMissingScoreParts({
-        fundamental: scoreFundamental,
-        qualitaet: scoreQualitaet,
-        krise: scoreKrise,
-        trend: scoreTrend,
-      }),
-      parseError: parsed.parseError,
-    });
-    if (anomaly) {
-      await logAppEvent({
-        eventType: "llm_output_anomaly",
-        functionName: "analyse",
-        status: "suspicious",
-        userId,
-        details: anomaly.details,
+    // Reines Diagnose-Logging: ein Fehler hier darf die Analyse nie abbrechen
+    // (der aeussere catch wuerde die Zeile leeren) - daher alles gekapselt.
+    try {
+      const anomaly = detectLlmAnomaly({
+        ticker,
+        provider,
+        callType: "qualitaet-analyse",
+        model: llmResult.responseModel ?? llmModel,
+        stopReason: llmResult.stopReason ?? null,
+        toolInput: llmResult.toolInput,
+        scoreQualitaet,
+        missingScoreParts: listMissingScoreParts({
+          fundamental: scoreFundamental,
+          qualitaet: scoreQualitaet,
+          krise: scoreKrise,
+          trend: scoreTrend,
+        }),
+        parseError: parsed.parseError,
       });
+      if (anomaly) {
+        await logAppEvent({
+          eventType: "llm_output_anomaly",
+          functionName: "analyse",
+          status: "suspicious",
+          userId,
+          details: anomaly.details,
+        });
+      }
+    } catch (e) {
+      console.error("[analyse] anomaly logging failed (ignored):", (e as Error).message);
     }
     let warnings = [...scoreData.warningsNumerisch, ...parsed.warnings];
     let tokensInput = parsed.tokensInput, tokensOutput = parsed.tokensOutput, costUsd = parsed.costUsd;
@@ -375,30 +381,34 @@ async function runAnalysis(
         stopReason: llmResult2.stopReason,
         model: llmResult2.responseModel,
       });
-      const anomaly2 = detectLlmAnomaly({
-        ticker,
-        provider,
-        callType: "qualitaet-analyse-kontrolle",
-        model: llmResult2.responseModel ?? controlModel,
-        stopReason: llmResult2.stopReason ?? null,
-        toolInput: llmResult2.toolInput,
-        scoreQualitaet: parsed2.scoreQualitaet,
-        missingScoreParts: listMissingScoreParts({
-          fundamental: scoreFundamental,
-          qualitaet: parsed2.scoreQualitaet,
-          krise: scoreKrise,
-          trend: scoreTrend,
-        }),
-        parseError: parsed2.parseError,
-      });
-      if (anomaly2) {
-        await logAppEvent({
-          eventType: "llm_output_anomaly",
-          functionName: "analyse",
-          status: "suspicious",
-          userId,
-          details: anomaly2.details,
+      try {
+        const anomaly2 = detectLlmAnomaly({
+          ticker,
+          provider,
+          callType: "qualitaet-analyse-kontrolle",
+          model: llmResult2.responseModel ?? controlModel,
+          stopReason: llmResult2.stopReason ?? null,
+          toolInput: llmResult2.toolInput,
+          scoreQualitaet: parsed2.scoreQualitaet,
+          missingScoreParts: listMissingScoreParts({
+            fundamental: scoreFundamental,
+            qualitaet: parsed2.scoreQualitaet,
+            krise: scoreKrise,
+            trend: scoreTrend,
+          }),
+          parseError: parsed2.parseError,
         });
+        if (anomaly2) {
+          await logAppEvent({
+            eventType: "llm_output_anomaly",
+            functionName: "analyse",
+            status: "suspicious",
+            userId,
+            details: anomaly2.details,
+          });
+        }
+      } catch (e) {
+        console.error("[analyse] anomaly logging (Kontrolllauf) failed (ignored):", (e as Error).message);
       }
       const scoreQualitaet2 = parsed2.scoreQualitaet ?? scoreQualitaet;
       let scoreTotal2 = scoreTotal;

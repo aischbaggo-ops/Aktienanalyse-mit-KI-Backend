@@ -22,13 +22,17 @@ export async function logAppEvent(params: {
   details?: Record<string, unknown> | null;
 }): Promise<void> {
   try {
-    await supabase.from("app_events").insert({
+    const { error } = await supabase.from("app_events").insert({
       event_type: params.eventType,
       function_name: params.functionName,
       status: params.status,
       user_id: params.userId ?? null,
       details: params.details ?? null,
     });
+    // supabase-js wirft bei einem DB-Fehler nicht, sondern liefert {error} -
+    // ohne diese Zeile ginge ein abgelehnter Insert (z.B. CHECK-Verstoss)
+    // spurlos verloren.
+    if (error) console.error("[logAppEvent] insert failed:", params.eventType, error.code, error.message);
   } catch (e) {
     console.error("[logAppEvent] failed:", (e as Error).message);
   }

@@ -53,15 +53,23 @@ export async function logApiCall(entry: ApiCallLogEntry): Promise<void> {
       error_message: entry.errorMessage ?? null,
       stop_reason: entry.stopReason ?? null,
     };
+    // supabase-js wirft bei DB-Fehlern nicht, sondern liefert {error}.
+    const logInsertError = (error: { code?: string; message?: string } | null) => {
+      if (error) console.error("[logApiCall] insert failed:", error.code, error.message);
+    };
     if (entry.model == null) {
-      await supabase.from("api_call_log").insert(row);
+      const { error } = await supabase.from("api_call_log").insert(row);
+      logInsertError(error);
       return;
     }
     const { error } = await supabase.from("api_call_log").insert({ ...row, model: entry.model });
     if (isMissingColumnError(error)) {
       // Migration noch nicht eingespielt: ohne Modell erneut schreiben, damit
       // die uebrigen Felder nicht verloren gehen.
-      await supabase.from("api_call_log").insert(row);
+      const { error: retryError } = await supabase.from("api_call_log").insert(row);
+      logInsertError(retryError);
+    } else {
+      logInsertError(error);
     }
   } catch (e) {
     console.error("[logApiCall] failed:", (e as Error).message);
