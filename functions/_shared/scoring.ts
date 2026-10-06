@@ -1,3 +1,5 @@
+import { buildNewsSummary } from "./dataFlags.ts";
+
 export function ok(x: any) { return x && x.ok && x.data; }
 export function arr(x: any) { return ok(x) && Array.isArray(x.data) ? x.data : []; }
 export function first(x: any) { const a = arr(x); return a.length ? a[0] : null; }
@@ -385,9 +387,7 @@ export function computeScores(d: any) {
     : "Kein Firmenprofil verfuegbar.";
   const peersArr = arr(d.peers);
   const peersSummary = peersArr.length ? peersArr.map((p: any) => `${p.symbol} (${p.companyName})`).join(", ") : "Keine Peer-Daten verfuegbar.";
-  const newsSummary = newsRaw.length
-    ? newsRaw.slice(0, 10).map((n: any) => `- [${n.publishedDate || n.date || ""}] ${n.title || n.text || ""}`).join("\n")
-    : "Keine aktuellen News verfuegbar (News-Endpunkt im FMP Free-Plan gesperrt).";
+  const newsSummary = buildNewsSummary(newsRaw, d.newsStatus);
 
   return {
     ticker: d.ticker,
