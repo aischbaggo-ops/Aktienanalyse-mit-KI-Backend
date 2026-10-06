@@ -8,7 +8,8 @@ import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
-import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
+import { BENCHMARK_SYMBOL, buildDataFlags, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
+import { fetchNews } from "../_shared/news.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
@@ -149,7 +150,7 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
     fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
     fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey, ticker),
     fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey, ticker),
-    fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey, ticker),
+    fetchNews(ticker, (path) => fmpGet(path, fmpKey, ticker)),
     fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`, fmpKey, ticker),
     fmpGet(`/historical-price-eod/full?symbol=${encodeURIComponent(BENCHMARK_SYMBOL)}&from=2000-01-01`, fmpKey, ticker),
     fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey, ticker),
@@ -158,14 +159,15 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
   ]);
   // Ein einziger ungueltiger Key betrifft alle Aufrufe gleichermassen (selber
   // Key fuer alle) - ein Treffer reicht, um den Lauf als Key-Fehler statt als
-  // Datenluecke einzuordnen. Der News-Endpunkt zaehlt bewusst NICHT mit: eine
-  // Verweigerung dort (HTTP 401/402/403) ergibt news_status "blocked", die
-  // Analyse laeuft weiter (siehe fmpAuthErrorExcludingNews).
+  // Datenluecke einzuordnen. Die News (fetchNews) zaehlen bewusst NICHT mit:
+  // eine Verweigerung dort (HTTP 401/402/403) ergibt news_status "blocked",
+  // die Analyse laeuft weiter.
   const fmpAuthError = fmpAuthErrorExcludingNews({
-    profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades,
+    profile, peers, income, balance, cashflow, estimates, dcf, priceStock, priceIndex, scores, priceTargetSummary, grades,
   });
-  const newsStatus = classifyNewsStatus(news);
-  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, newsStatus, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
+  // computeScores() erwartet die News in der Form eines FMP-Ergebnisses.
+  const newsForScoring = { ok: true, data: news.items };
+  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news: newsForScoring, newsStatus: news.status, newsSource: news.source, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
@@ -515,6 +517,7 @@ async function runAnalysis(
         // Score, Status oder Cache.
         data_flags: buildDataFlags({
           newsStatus: fmpData.newsStatus,
+          newsSource: fmpData.newsSource,
           availability: scoreData.dataAvailability,
           balanceRows: arr(fmpData.balance),
           incomeRows: arr(fmpData.income),
