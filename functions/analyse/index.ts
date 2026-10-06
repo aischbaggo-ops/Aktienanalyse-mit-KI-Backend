@@ -8,6 +8,7 @@ import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
+import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus } from "../_shared/dataFlags.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
@@ -90,10 +91,18 @@ const supabase = createClient(
 
 async function fmpGet(path: string, fmpKey: string, ticker: string) {
   const startedAt = Date.now();
+  let status: number | null = null;
+  let bodyCopy: Response | null = null;
   try {
     const url = FMP_BASE + path + (path.includes("?") ? "&" : "?") + "apikey=" + fmpKey;
     const res = await fetch(url);
+    status = res.status;
+    // Nur beim News-Endpunkt eine Kopie des Bodys behalten: bei Nicht-JSON-
+    // Antworten (Klartext wie "Restricted") bleibt so der Anfang fuer den
+    // news_status erhalten. Verhalten und Logging sonst unveraendert.
+    if (path.startsWith("/news/")) bodyCopy = res.clone();
     const data = await res.json();
+    bodyCopy?.body?.cancel().catch(() => {});
     // FMP liefert bei ungueltigem/abgelaufenem Key HTTP 401/403 zurueck, aber
     // trotzdem einen normalen JSON-Body - ohne diese Unterscheidung sieht das
     // im weiteren Verlauf wie eine ganz normale Datenluecke aus (z.B.
@@ -108,8 +117,16 @@ async function fmpGet(path: string, fmpKey: string, ticker: string) {
       durationMs: Date.now() - startedAt,
       errorMessage: res.ok ? null : `HTTP ${res.status}`,
     });
-    return { ok: res.ok, data, authError };
+    return { ok: res.ok, data, authError, status };
   } catch (e) {
+    let bodySnippet: string | null = null;
+    if (bodyCopy) {
+      try {
+        bodySnippet = (await bodyCopy.text()).slice(0, 120);
+      } catch {
+        // Body nicht lesbar - dann bleibt es bei status/error.
+      }
+    }
     await logApiCall({
       functionName: "analyse",
       provider: "fmp",
@@ -119,7 +136,7 @@ async function fmpGet(path: string, fmpKey: string, ticker: string) {
       durationMs: Date.now() - startedAt,
       errorMessage: (e as Error).message,
     });
-    return { ok: false, error: (e as Error).message, authError: false };
+    return { ok: false, error: (e as Error).message, authError: false, status, bodySnippet };
   }
 }
 
@@ -134,7 +151,7 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
     fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey, ticker),
     fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`, fmpKey, ticker),
-    fmpGet(`/historical-price-eod/full?symbol=%5EGSPC&from=2000-01-01`, fmpKey, ticker),
+    fmpGet(`/historical-price-eod/full?symbol=${encodeURIComponent(BENCHMARK_SYMBOL)}&from=2000-01-01`, fmpKey, ticker),
     fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/grades?symbol=${ticker}`, fmpKey, ticker),
@@ -145,7 +162,8 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
   const fmpAuthError = [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades].some(
     (r) => r.authError === true,
   );
-  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
+  const newsStatus = classifyNewsStatus(news);
+  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, newsStatus, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
@@ -186,6 +204,15 @@ async function runAnalysis(
       // fmpAuthError-Fall oben.
       throw new Error("Keine Profildaten bei FMP gefunden - Ticker existiert vermutlich nicht.");
     }
+
+    // Datenlage dieses Laufs, nur zur Kennzeichnung (chart_data.data_flags),
+    // ohne Einfluss auf Score, Status oder Cache.
+    const dataFlags = buildDataFlags({
+      newsStatus: fmpData.newsStatus,
+      availability: scoreData.dataAvailability,
+      balanceRows: arr(fmpData.balance),
+      incomeRows: arr(fmpData.income),
+    });
 
     const stability = computeStabilityScore(
       fmpData.scores,
@@ -487,6 +514,7 @@ async function runAnalysis(
         relativeStrength: scoreData.relativeStrength,
         returnBars: scoreData.returnBars,
         quickCheck,
+        data_flags: dataFlags,
         analystConsensus,
         bankRatings,
         // Fuer den Analysten-Memo-Kopfbereich: alles bereits im selben
