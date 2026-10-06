@@ -8,7 +8,7 @@ import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
-import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus, fmpAuthErrorExcludingNews } from "../_shared/dataFlags.ts";
+import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
@@ -207,15 +207,6 @@ async function runAnalysis(
       throw new Error("Keine Profildaten bei FMP gefunden - Ticker existiert vermutlich nicht.");
     }
 
-    // Datenlage dieses Laufs, nur zur Kennzeichnung (chart_data.data_flags),
-    // ohne Einfluss auf Score, Status oder Cache.
-    const dataFlags = buildDataFlags({
-      newsStatus: fmpData.newsStatus,
-      availability: scoreData.dataAvailability,
-      balanceRows: arr(fmpData.balance),
-      incomeRows: arr(fmpData.income),
-    });
-
     const stability = computeStabilityScore(
       fmpData.scores,
       scoreData.debtRatioAmpel,
@@ -279,6 +270,7 @@ async function runAnalysis(
     const llmCallStart = Date.now();
     const llmResult = await callLLM({ provider, apiKey: llmApiKey, model: llmModel, systemPrompt: SYSTEM_PROMPT, userPrompt });
     const parsed = parseAnalysisResult(llmResult);
+    const recoveryRuns = [parsed.embeddedRecovery];
     await logApiCall({
       functionName: "analyse",
       provider,
@@ -397,6 +389,7 @@ async function runAnalysis(
       const llmCallStart2 = Date.now();
       const llmResult2 = await callLLM({ provider, apiKey: llmApiKey, model: controlModel, systemPrompt: SYSTEM_PROMPT, userPrompt });
       const parsed2 = parseAnalysisResult(llmResult2);
+      recoveryRuns.push(parsed2.embeddedRecovery);
       await logApiCall({
         functionName: "analyse",
         provider,
@@ -518,7 +511,15 @@ async function runAnalysis(
         relativeStrength: scoreData.relativeStrength,
         returnBars: scoreData.returnBars,
         quickCheck,
-        data_flags: dataFlags,
+        // Datenlage dieses Laufs, nur zur Kennzeichnung, ohne Einfluss auf
+        // Score, Status oder Cache.
+        data_flags: buildDataFlags({
+          newsStatus: fmpData.newsStatus,
+          availability: scoreData.dataAvailability,
+          balanceRows: arr(fmpData.balance),
+          incomeRows: arr(fmpData.income),
+          llmRecovered: llmRecoveredFrom(recoveryRuns),
+        }),
         analystConsensus,
         bankRatings,
         // Fuer den Analysten-Memo-Kopfbereich: alles bereits im selben
