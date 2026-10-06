@@ -5,6 +5,7 @@ import {
   buildDataFlags,
   buildNewsSummary,
   classifyNewsStatus,
+  fmpAuthErrorExcludingNews,
   reportedCurrencyFrom,
 } from "./dataFlags.ts";
 
@@ -74,4 +75,29 @@ Deno.test("data_flags: Felder aus dataAvailability uebernommen", () => {
   assert(f.reported_currency === "USD", "Waehrung");
   assert(f.benchmark_symbol === "^GSPC" && BENCHMARK_SYMBOL === "^GSPC", "Benchmark");
   assert(encodeURIComponent(BENCHMARK_SYMBOL) === "%5EGSPC", "URL unveraendert");
+});
+
+Deno.test("News 403 mit JSON-Body: blocked, kein Key-Fehler, Analyse laeuft weiter", () => {
+  // Form des Ergebnisses von fmpGet() bei HTTP 403 mit JSON-Body.
+  const news = { ok: false, data: { "Error Message": "Forbidden" }, authError: true, status: 403 };
+  assert(classifyNewsStatus(news) === "blocked", "403 + JSON = blocked");
+  const ok = { ok: true, data: [{ symbol: "X" }], authError: false, status: 200 };
+  const results = { profile: ok, income: ok, balance: ok, news };
+  assert(fmpAuthErrorExcludingNews(results) === false, "News-403 darf keinen Key-Fehler ausloesen");
+});
+
+Deno.test("Key-Fehler bleibt fuer die uebrigen Endpunkte bestehen", () => {
+  const bad = { ok: false, data: { message: "Invalid API KEY" }, authError: true, status: 401 };
+  const ok = { ok: true, data: [], authError: false, status: 200 };
+  assert(fmpAuthErrorExcludingNews({ profile: bad, news: ok }) === true, "profile 401");
+  assert(fmpAuthErrorExcludingNews({ income: ok, grades: bad, news: bad }) === true, "grades 401 zaehlt");
+  assert(fmpAuthErrorExcludingNews({ profile: ok, news: bad }) === false, "nur news");
+  assert(fmpAuthErrorExcludingNews({}) === false, "leer");
+});
+
+Deno.test("news_status: JSON-Fehlerbody ist blocked, 429 und 5xx bleiben error", () => {
+  assert(classifyNewsStatus({ ok: true, data: { "Error Message": "Limit" }, status: 200 }) === "blocked", "200 + Objekt");
+  assert(classifyNewsStatus({ ok: false, data: { error: "bad" }, status: 400 }) === "blocked", "400 + JSON");
+  assert(classifyNewsStatus({ ok: false, data: { "Error Message": "Restricted" }, status: 429 }) === "error", "429 zuerst");
+  assert(classifyNewsStatus({ ok: false, data: { message: "x" }, status: 503 }) === "error", "503 zuerst");
 });

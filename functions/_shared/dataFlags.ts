@@ -24,15 +24,28 @@ export interface FmpResultLike {
 // Planbezeichnung: entscheidend ist, was der Endpunkt antwortet.
 const BLOCKED_TEXT = /restricted|premium|upgrade|subscription|forbidden|unauthori[sz]ed|not available/i;
 
+// Reihenfolge ist wichtig: 429 und 5xx sind vorruebergehende Fehler ("error")
+// und werden vor jeder Inhaltspruefung entschieden.
 export function classifyNewsStatus(r: FmpResultLike | null | undefined): NewsStatus {
   if (!r) return "error";
+  const status = r.status ?? null;
+  if (status === 429 || (status !== null && status >= 500)) return "error";
   if (r.ok && Array.isArray(r.data)) return r.data.length > 0 ? "ok" : "empty";
-  if (r.status === 401 || r.status === 402 || r.status === 403) return "blocked";
+  if (status === 401 || status === 402 || status === 403) return "blocked";
+  // JSON-Fehlerbody (Objekt statt Array), z.B. {"Error Message": "..."}.
+  if (r.data && typeof r.data === "object" && !Array.isArray(r.data)) return "blocked";
   if (r.bodySnippet && BLOCKED_TEXT.test(r.bodySnippet)) return "blocked";
-  if (r.data && typeof r.data === "object" && !Array.isArray(r.data)) {
-    if (BLOCKED_TEXT.test(JSON.stringify(r.data).slice(0, 300))) return "blocked";
-  }
   return "error";
+}
+
+// Der Key-Fehler ("FMP-API-Key ungueltig oder abgelaufen.") gilt nur fuer die
+// uebrigen Endpunkte. Ein News-Endpunkt, der mit HTTP 401/403 antwortet (auch
+// mit JSON-Body), bricht den Lauf nicht ab, sondern ergibt news_status
+// "blocked" (classifyNewsStatus).
+export function fmpAuthErrorExcludingNews(
+  results: Record<string, { authError?: boolean } | null | undefined>,
+): boolean {
+  return Object.entries(results).some(([name, r]) => name !== "news" && r?.authError === true);
 }
 
 // Prompt-Block "AKTUELLE NEWS": zustandsabhaengig und ohne Planname.

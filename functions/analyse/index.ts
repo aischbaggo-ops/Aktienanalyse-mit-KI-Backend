@@ -8,7 +8,7 @@ import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
-import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus } from "../_shared/dataFlags.ts";
+import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus, fmpAuthErrorExcludingNews } from "../_shared/dataFlags.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
@@ -158,10 +158,12 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
   ]);
   // Ein einziger ungueltiger Key betrifft alle Aufrufe gleichermassen (selber
   // Key fuer alle) - ein Treffer reicht, um den Lauf als Key-Fehler statt als
-  // Datenluecke einzuordnen.
-  const fmpAuthError = [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades].some(
-    (r) => r.authError === true,
-  );
+  // Datenluecke einzuordnen. Der News-Endpunkt zaehlt bewusst NICHT mit: eine
+  // Verweigerung dort (HTTP 401/402/403) ergibt news_status "blocked", die
+  // Analyse laeuft weiter (siehe fmpAuthErrorExcludingNews).
+  const fmpAuthError = fmpAuthErrorExcludingNews({
+    profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades,
+  });
   const newsStatus = classifyNewsStatus(news);
   return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, newsStatus, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
 }
