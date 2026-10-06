@@ -3,17 +3,14 @@
 // Status. analyse/index.ts schreibt das Ergebnis als app_events-Eintrag
 // (event_type "llm_output_anomaly", status "suspicious").
 import { ANALYSIS_TOOL_SCHEMA } from "./prompt.ts";
+import { embeddedMarkers, listMarkers, type RescueResult } from "./embeddedFields.ts";
 
 // Muster, die zeigen, dass das Modell Tool-Felder als Text in einen String
-// (v.a. fazit) geschrieben hat statt als eigene Properties.
-export const EMBEDDED_MARKERS = [
-  "<parameter",
-  "</invoke>",
-  "</fazit>",
-  "<kriterien>",
-  "<swot>",
-  "<warnings>",
-] as const;
+// (v.a. fazit) geschrieben hat statt als eigene Properties: "<parameter",
+// "</invoke>" und je Schema-Feld "<feld" (auch <feld">) und "</feld>" - dieselbe
+// Quelle wie das Fangnetz (embeddedFields.ts).
+const SCHEMA_MARKERS = embeddedMarkers(Object.keys(ANALYSIS_TOOL_SCHEMA.properties));
+export const EMBEDDED_MARKERS: readonly string[] = SCHEMA_MARKERS.map((m) => m.name);
 
 // "20 KB" fuer das rohe toolInput im Event (UTF-8-Bytes).
 export const MAX_TOOL_INPUT_BYTES = 20 * 1024;
@@ -31,7 +28,7 @@ export function findEmbeddedMarkers(value: unknown): EmbeddedMarkerHits {
   const walk = (v: unknown, path: string, depth: number) => {
     if (depth > MAX_WALK_DEPTH) return;
     if (typeof v === "string") {
-      const hit = EMBEDDED_MARKERS.filter((m) => v.includes(m));
+      const hit = listMarkers(v, SCHEMA_MARKERS);
       if (hit.length > 0) {
         hit.forEach((m) => markers.add(m));
         fields.push(path || "(root)");
@@ -91,6 +88,8 @@ export interface LlmAnomalyInput {
   scoreQualitaet: number | null;
   missingScoreParts: string[];
   parseError?: string | null;
+  // Befund des Fangnetzes (rescueEmbeddedFields), falls es angewandt wurde.
+  recovery?: RescueResult | null;
 }
 
 export interface LlmAnomaly {
@@ -107,6 +106,7 @@ export function detectLlmAnomaly(input: LlmAnomalyInput): LlmAnomaly | null {
   if (input.scoreQualitaet === null) reasons.push("score_qualitaet_null");
   if (hits.markers.length > 0) reasons.push("embedded_markers");
   if (reasons.length === 0) return null;
+  for (const r of input.recovery?.reasons ?? []) if (!reasons.includes(r)) reasons.push(r);
 
   const details: Record<string, unknown> = {
     ticker: input.ticker,
@@ -121,6 +121,19 @@ export function detectLlmAnomaly(input: LlmAnomalyInput): LlmAnomaly | null {
     marker_fields: hits.fields,
     parse_error: input.parseError ?? null,
   };
+
+  if (input.recovery?.touched) {
+    const rec = input.recovery;
+    details.recovery = {
+      adopted_fields: Object.keys(rec.adopted),
+      // Beide Werte je Konflikt (gekuerzt); das vorhandene Feld hat gewonnen.
+      conflicts: rec.conflicts,
+      rejected: rec.rejected,
+      fazit_cut: rec.cleanText.fazit !== undefined,
+      description_cut: rec.cleanText.firmenbeschreibung_de !== undefined,
+      reasons: rec.reasons,
+    };
+  }
 
   if (input.toolInput === null) {
     details.tool_input = null;

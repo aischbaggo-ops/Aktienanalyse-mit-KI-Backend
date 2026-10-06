@@ -338,6 +338,7 @@ async function runAnalysis(
           trend: scoreTrend,
         }),
         parseError: parsed.parseError,
+        recovery: parsed.embeddedRecovery,
       });
       if (anomaly) {
         await logAppEvent({
@@ -426,6 +427,7 @@ async function runAnalysis(
             trend: scoreTrend,
           }),
           parseError: parsed2.parseError,
+          recovery: parsed2.embeddedRecovery,
         });
         if (anomaly2) {
           await logAppEvent({

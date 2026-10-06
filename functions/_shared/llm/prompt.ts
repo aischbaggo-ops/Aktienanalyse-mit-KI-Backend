@@ -4,6 +4,8 @@
 // in den einzelnen Adaptern (claude.ts/openai.ts/gemini.ts). Inhaltlich
 // UNVERAENDERT - keine neue Bewertungslogik, kein neues Feld.
 
+import { rescueEmbeddedFields } from "./embeddedFields.ts";
+
 export const QUAL_WEIGHTS: Record<string, { w: number; optional: boolean }> = {
   "Geschaeftsmodell verstanden": { w: 1, optional: false },
   "Produkte vertraut, wuerde selbst nutzen": { w: 1, optional: false },
@@ -143,27 +145,6 @@ function ampelNum(s: string): number | null {
   return 0;
 }
 
-function extractEmbeddedFields(input: any): {
-  kriterien?: any[];
-  cleanFazit?: string;
-  firmenbeschreibungDe?: string;
-} {
-  const fazit = input?.fazit;
-  if (typeof fazit !== "string" || !fazit.includes("<parameter")) return {};
-  const result: Record<string, any> = {};
-  const fazitEnd = fazit.indexOf("</fazit>");
-  const paramStart = fazit.indexOf("<parameter");
-  if (fazitEnd >= 0) result.cleanFazit = fazit.substring(0, fazitEnd).trim();
-  else if (paramStart >= 0) result.cleanFazit = fazit.substring(0, paramStart).trim();
-  const kriterienMatch = fazit.match(/<parameter\s+name="kriterien">\s*(\[[\s\S]*\])\s*(?:<\/|$)/);
-  if (kriterienMatch) {
-    try { result.kriterien = JSON.parse(kriterienMatch[1]); } catch { /* ignore */ }
-  }
-  const firmenMatch = fazit.match(/<parameter\s+name="firmenbeschreibung_de">([\s\S]*?)<\/firmenbeschreibung_de>/);
-  if (firmenMatch) result.firmenbeschreibungDe = firmenMatch[1].trim();
-  return result;
-}
-
 // Providerneutrale Auswertung eines LlmToolResult - 1:1 die bisherige
 // Ampel-/Score-Rechenlogik aus parseClaudeResponse(), nur auf das
 // gemeinsame Zwischenformat (toolInput statt rohem Claude-JSON) umgestellt.
@@ -171,19 +152,23 @@ export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) 
   const claudeParsed = result.toolInput;
   const parseError = claudeParsed ? null : result.rawError ?? "Kein gueltiger strukturierter Aufruf in der Modell-Antwort.";
 
-  let kriterien: any[] | undefined = Array.isArray((claudeParsed as any)?.kriterien)
-    ? (claudeParsed as any).kriterien
-    : undefined;
-  let fazitRaw: string | null = (claudeParsed as any)?.fazit ?? null;
-  let firmenRaw: string | null = (claudeParsed as any)?.firmenbeschreibung_de ?? null;
-
-  const embedded = claudeParsed && !kriterien ? extractEmbeddedFields(claudeParsed) : {};
-  if (!kriterien && embedded.kriterien) {
-    kriterien = embedded.kriterien;
-    console.warn("[parseAnalysisResult] kriterien recovered from embedded XML in fazit");
+  // Fangnetz a): in String-Feldern eingebettete Tool-Felder erkennen, den
+  // Anzeigetext abschneiden und gueltige Felder NUR ergaenzen (siehe
+  // embeddedFields.ts). Ein vorhandenes gueltiges Tool-Feld bleibt unveraendert.
+  const embeddedRecovery = claudeParsed
+    ? rescueEmbeddedFields(claudeParsed, {
+        fieldNames: Object.keys(ANALYSIS_TOOL_SCHEMA.properties),
+        criteriaNames: Object.keys(QUAL_WEIGHTS),
+      })
+    : null;
+  const merged: any = embeddedRecovery ? { ...(claudeParsed as any), ...embeddedRecovery.adopted } : claudeParsed;
+  if (embeddedRecovery && Object.keys(embeddedRecovery.adopted).length > 0) {
+    console.warn(`[parseAnalysisResult] fields recovered from embedded text: ${Object.keys(embeddedRecovery.adopted).join(", ")}`);
   }
-  if (embedded.cleanFazit) fazitRaw = embedded.cleanFazit;
-  if (!firmenRaw && embedded.firmenbeschreibungDe) firmenRaw = embedded.firmenbeschreibungDe;
+
+  const kriterien: any[] | undefined = Array.isArray(merged?.kriterien) ? merged.kriterien : undefined;
+  const fazitRaw: string | null = embeddedRecovery?.cleanText.fazit ?? merged?.fazit ?? null;
+  const firmenRaw: string | null = embeddedRecovery?.cleanText.firmenbeschreibung_de ?? merged?.firmenbeschreibung_de ?? null;
 
   let scoreQualitaet: number | null = null;
   let qualitaetKriterien: any[] = [];
@@ -204,12 +189,12 @@ export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) 
   }
 
   return {
-    claudeParsed, parseError, scoreQualitaet, qualitaetKriterien,
+    claudeParsed, embeddedRecovery, parseError, scoreQualitaet, qualitaetKriterien,
     tokensInput: result.tokensInput, tokensOutput: result.tokensOutput, costUsd: result.costUsd,
-    warnings: (claudeParsed as any)?.warnings || [],
+    warnings: merged?.warnings || [],
     fazit: fazitRaw || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
-    swot: (claudeParsed as any)?.swot ?? null,
-    noGoHart: (claudeParsed as any)?.no_go_hart === true,
+    swot: merged?.swot ?? null,
+    noGoHart: merged?.no_go_hart === true,
     firmenbeschreibungDe: firmenRaw,
   };
 }

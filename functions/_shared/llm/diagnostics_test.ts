@@ -45,7 +45,7 @@ Deno.test("AAPL-Form: direkte Tags im fazit, kriterien fehlt", () => {
   assert(a !== null, "Event erwartet");
   const d = a!.details as Record<string, unknown>;
   assert((a!.reasons).join() === "score_qualitaet_null,embedded_markers", "beide Gruende");
-  assert((d.markers as string[]).join() === "</invoke>,</fazit>,<kriterien>,<swot>,<warnings>", "Marker");
+  assert(["</invoke>", "</fazit>", "<kriterien", "<swot", "<warnings"].every((m) => (d.markers as string[]).includes(m)), "Marker (auch <kriterien\" und </feld>)");
   assert((d.marker_fields as string[]).join() === "fazit", "Feld fazit");
   assert((d.missing_tool_fields as string[]).join() === "kriterien,warnings,no_go_hart,swot,firmenbeschreibung_de", "fehlende Felder");
   assert(d.model === "claude-sonnet-5" && d.stop_reason === "tool_use" && d.ticker === "TEST", "Metadaten");
@@ -65,7 +65,7 @@ Deno.test("MSFT/DIS-Form: Reste im fazit, kriterien korrekt vorhanden", () => {
 
 Deno.test("Marker in verschachteltem String wird mit Pfad gemeldet", () => {
   const hits = findEmbeddedMarkers({ kriterien: [{ begruendung: "ok" }, { begruendung: "x <swot> y" }] });
-  assert(hits.markers.join() === "<swot>", "Marker");
+  assert(hits.markers.join() === "<swot", "Marker");
   assert(hits.fields.join() === "kriterien[1].begruendung", "Pfad");
 });
 
@@ -85,4 +85,19 @@ Deno.test("toolInput > 20 KB wird auf 20 KB (UTF-8) begrenzt", () => {
   assert(new TextEncoder().encode(d.tool_input_json as string).length <= MAX_TOOL_INPUT_BYTES, "<= 20 KB");
   assert((d.tool_input_bytes as number) > MAX_TOOL_INPUT_BYTES, "Originalgroesse vermerkt");
   assert(truncateUtf8("abc", 10).truncated === false, "kurzer Text unveraendert");
+});
+
+Deno.test("Event enthaelt den Befund des Fangnetzes (uebernommen, Konflikt mit beiden Werten)", () => {
+  const recovery = {
+    touched: true, markers: ["</fazit>"], adopted: { firmenbeschreibung_de: "x" }, cleanText: { fazit: "Sauber." },
+    conflicts: [{ field: "no_go_hart", existing: "false", embedded: "true" }],
+    rejected: [], reasons: ["embedded_recovered", "embedded_conflict"],
+  };
+  const toolInput = { kriterien: [], fazit: "Text.</fazit>" };
+  const a = detectLlmAnomaly({ ...base, toolInput, scoreQualitaet: 80, recovery });
+  assert(a !== null, "Event");
+  assert(a!.reasons.includes("embedded_recovered") && a!.reasons.includes("embedded_conflict"), "Gruende uebernommen");
+  const rec = a!.details.recovery as Record<string, any>;
+  assert(rec.adopted_fields.join() === "firmenbeschreibung_de" && rec.fazit_cut === true, "uebernommene Felder");
+  assert(rec.conflicts[0].existing === "false" && rec.conflicts[0].embedded === "true", "beide Werte");
 });
