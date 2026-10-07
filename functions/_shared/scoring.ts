@@ -300,9 +300,17 @@ export function computeScores(d: any) {
   const krisenKomponente = crisisDetail.reduce((s, c) => s + c.a * c.r, 0) / sumR;
   const beta = profile && typeof profile.beta === "number" ? profile.beta : null;
   const betaAmpel = beta === null ? null : beta < 1.0 ? 1 : beta <= 1.75 ? 0.5 : 0;
+  // Ohne Kurse der Aktie in irgendeinem Krisenfenster (keine oder zu kurze
+  // Kursreihe) ist der Krise-Score nicht bestimmbar: null statt eines
+  // Artefakts aus lauter neutralen 0,5 plus Beta (z. B. PG 60 im Free-Plan).
+  // Fehlt nur ein einzelnes Fenster (z. B. Dotcom bei spaeterem IPO), bleibt
+  // es laut Spec bei 0,5 fuer dieses Fenster.
+  const hasCrisisPrices = crisisDetail.some((c) => c.ddStock !== null);
   // Fehlt Beta (GRAU), wird die Krisen-Komponente allein auf 100% gestreckt,
   // statt den 20%-Beta-Anteil stillschweigend als "rot" (0) zu werten.
-  const scoreKrise = betaAmpel === null
+  const scoreKrise = !hasCrisisPrices
+    ? null
+    : betaAmpel === null
     ? krisenKomponente * 100
     : (0.8 * krisenKomponente + 0.2 * betaAmpel) * 100;
 
@@ -355,7 +363,12 @@ export function computeScores(d: any) {
   { const diff = wCagrStock !== null && wCagrIndex !== null ? wCagrStock - wCagrIndex : null;
     const a = diff === null ? null : diff > 0.01 ? 1 : diff >= -0.01 ? 0.5 : 0;
     trendKriterien.push({ name: "Performance vs. S&P (zeitgewichtete CAGR-Differenz)", a, wert: diff }); }
-  const scoreTrend = subScore(trendKriterien.map((k) => ({ a: k.a, w: 1 })));
+  // Ohne mindestens eine Jahresrendite der Aktie (keine oder zu kurze
+  // Kursreihe) sind CAGR, Volatilitaet und S&P-Vergleich nicht berechenbar;
+  // die Unterwasser-Kennzahl allein soll dann keinen Trend-Score tragen.
+  const scoreTrend = stockReturns.length === 0
+    ? null
+    : subScore(trendKriterien.map((k) => ({ a: k.a, w: 1 })));
 
   const warningsNumerisch: string[] = [];
   if (dynVerschuldungKO) warningsNumerisch.push("Dynamischer Verschuldungsgrad zweistellig (Netto-Schulden/FCF >= 10 Jahre) - Ausschluss-Hinweis.");

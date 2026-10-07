@@ -1,4 +1,7 @@
 -- Flache Rangliste-Sicht ueber stock_analyses (ENTWURF, nicht eingespielt).
+-- Laut Entscheidung erst nach dem US-Lauf einspielen. Urspruenglich
+-- 20261006100000, am 07.10. auf einen Zeitstempel nach
+-- 20261007100000 (Ticket f) umbenannt, damit ein normales db push reicht.
 --
 -- Zweck: Sortieren, Filtern und CSV-Export der Analysen, ohne dass das
 -- Frontend JSON-Pfade aus chart_data/bewertung/criteria kennen muss. Enthaelt
@@ -21,7 +24,14 @@ select
   a.ticker,
   a.company_name                                            as name,
   a.status,
+  -- updated_at = Datum der gespeicherten Analyse: der Trigger aus
+  -- 20261007100000 laesst es bei laufendem oder gescheitertem Refresh stehen.
   a.updated_at                                              as analysed_at,
+  -- Letzter Lauf (Ticket f). 'error' bei status 'done' heisst: Refresh
+  -- gescheitert, die gezeigten Werte stammen aus der aelteren Analyse.
+  -- Bewusst ohne last_run_error_public (keine Fehlertexte in der Sicht).
+  a.last_run_status,
+  a.last_run_at,
   a.sector,
   a.chart_data->'profileMeta'->>'industry'                  as industry,
   a.currency,
@@ -32,6 +42,8 @@ select
   a.score_total,
   a.score_fundamental,
   a.score_qualitaet,
+  -- Seit 07.10. NULL statt neutral, wenn die Kursreihe der Aktie fuer alle
+  -- Krisenfenster bzw. alle Jahresrenditen zu kurz ist.
   a.score_krise,
   a.score_trend,
   a.score_stabilitaet,
@@ -39,10 +51,9 @@ select
   -- K.O.-Auswertung. no_go_hart ist das LLM-Flag (Prompt: nur echter Betrug).
   coalesce((a.chart_data->>'no_go_hart')::boolean, false)   as no_go_hart,
 
-  -- Anzahl roter K.O.-Kriterien. "Geschaeftsmodell verstanden" ist nach
-  -- Algorithmus v1.2 ein K.O.-Kriterium; die App (QualitaetTab.tsx KO_NAMES,
-  -- Prompt-Satz zu 17-19) behandelt bisher nur die drei Oeffentlichkeits-
-  -- Kriterien so. ko_count kann deshalb hoeher sein als die App-Anzeige.
+  -- Anzahl roter K.O.-Kriterien, dieselben vier Namen wie in der App
+  -- (QualitaetTab.tsx KO_NAMES, seit Frontend-#26 inkl. "Geschaeftsmodell
+  -- verstanden"). K.O. ist nur Flag und Filter, kein Deckel auf den Score.
   (select count(*)
      from jsonb_array_elements(a.criteria) c
     where c->>'dimension' = 'Qualitaet'
