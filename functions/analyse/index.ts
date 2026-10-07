@@ -13,7 +13,8 @@ import { BENCHMARK_SYMBOL, buildDataFlags, fmpAuthErrorExcludingNews, llmRecover
 import { fetchNews } from "../_shared/news.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
-import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, startPatch } from "../_shared/analysisRun.ts";
+import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, isRunActive, runNotActiveFilter, startPatch } from "../_shared/analysisRun.ts";
+import { AnalysisAbort, preLlmAbort, profileAbort, rateLimitAbort, type RunErrorCode } from "../_shared/fmpStatus.ts";
 
 // Rate-Limit fuer neue Analyse-Laeufe (Audit M10 / urspruenglich Pentest-
 // Scratchpad M1). BEWUSST hoeher als der dort genannte Beispielwert
@@ -45,10 +46,7 @@ const MAX_ADMIN_CONTEXT_CHARS = 8000;
 // in runAnalysis) werden unveraendert durchgereicht. Kein Treffer -> null,
 // Frontend zeigt dann den bisherigen generischen Fallback-Text.
 function classifyErrorForUser(rawMessage: string, provider: LlmProvider): string | null {
-  if (
-    rawMessage === "FMP-API-Key ungültig oder abgelaufen." ||
-    rawMessage.startsWith("Keine Profildaten bei FMP gefunden")
-  ) {
+  if (rawMessage === "FMP-API-Key ungültig oder abgelaufen.") {
     return rawMessage;
   }
 
@@ -206,7 +204,14 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
   });
   // computeScores() erwartet die News in der Form eines FMP-Ergebnisses.
   const newsForScoring = { ok: true, data: news.items };
-  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news: newsForScoring, newsStatus: news.status, newsSource: news.source, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
+  // Rohe Einzelantworten fuer die Einordnung von Fehlschlaegen (Rate-Limit,
+  // Plan, Stoerung) - die zusammengefuehrten Kursreihen verdecken z. B. ein
+  // 429 in nur einem Fenster.
+  const raw = {
+    profile, peers, income, balance, cashflow, estimates, dcf,
+    priceStockOld, priceStockNew, priceIndexOld, priceIndexNew, scores, priceTargetSummary, grades,
+  };
+  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news: newsForScoring, newsStatus: news.status, newsSource: news.source, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError, raw };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
@@ -239,18 +244,20 @@ async function runAnalysis(
       // status:"error" mit klarer Meldung statt data_quality:"limited".
       throw new Error("FMP-API-Key ungültig oder abgelaufen.");
     }
+    // Rate-Limit bei irgendeinem FMP-Aufruf: abbrechen statt mit Luecken
+    // weiterzurechnen (der Batch wartet dann und wiederholt den Ticker).
+    const rateLimited = rateLimitAbort(fmpData.raw);
+    if (rateLimited) throw rateLimited;
+    // Profil fehlt: FMP antwortet auf einen nicht existierenden Ticker mit
+    // HTTP 200 und einem LEEREN Array (Junk-Ticker wie "WALLETUSD", siehe
+    // Pentest-Testfeedback) - ohne Abbruch liefe die Berechnung mit lauter
+    // nulls durch. Plan (402), Rate-Limit (429), Stoerung (5xx) und Netz
+    // werden dabei getrennt benannt statt pauschal "existiert vermutlich
+    // nicht" (siehe _shared/fmpStatus.ts).
+    const noProfile = profileAbort(fmpData.profile);
+    if (noProfile) throw noProfile;
     const scoreData = computeScores(fmpData);
-    if (!scoreData.profile) {
-      // FMP antwortet auf einen nicht existierenden/falsch geschriebenen
-      // Ticker mit HTTP 200 und einem LEEREN Array, nicht mit einem Fehler -
-      // ohne diese Pruefung lief die gesamte Berechnung unten mit lauter
-      // nulls einfach durch und landete als status:"done" mit leerem/
-      // unvollstaendigem Ergebnis statt als klar erkennbarer Fehlschlag
-      // (bekannter Fall: Junk-Ticker wie "WALLETUSD" oder "ZZZZ", siehe
-      // Pentest-Testfeedback). Bewusst hier abbrechen wie beim
-      // fmpAuthError-Fall oben.
-      throw new Error("Keine Profildaten bei FMP gefunden - Ticker existiert vermutlich nicht.");
-    }
+    if (!scoreData.profile) throw profileAbort({ ok: true, data: [] })!;
 
     const stability = computeStabilityScore(
       fmpData.scores,
@@ -307,6 +314,15 @@ async function runAnalysis(
         wert: scoreData.trend.wCagrStock,
       },
     };
+
+    // Fehlt Fundamental, Krise oder Trend schon jetzt, gibt es ohnehin keinen
+    // Gesamtscore: Claude-Aufruf sparen und den Lauf hier beenden.
+    const incomplete = preLlmAbort({
+      scores: { fundamental: scoreData.fundamental.score, krise: scoreData.krise.score, trend: scoreData.trend.score },
+      fundamentalResults: [fmpData.income, fmpData.balance, fmpData.cashflow],
+      stockPriceResults: [fmpData.raw.priceStockOld, fmpData.raw.priceStockNew],
+    });
+    if (incomplete) throw incomplete;
 
     const userPrompt = buildUserPrompt(scoreData, adminContext);
     if (adminContext) {
@@ -639,10 +655,13 @@ async function runAnalysis(
     // Mit gueltiger Analyse (Ticket f) bleibt sie dagegen vollstaendig
     // erhalten (status "done"), nur last_run_* zeigt den Fehlschlag.
     const message = (e as Error).message;
+    // AnalysisAbort traegt schon eine fertige Nutzer-Meldung (FMP-Status,
+    // fehlende Teilscores), alles andere wird wie bisher klassifiziert.
+    const publicMessage = e instanceof AnalysisAbort ? message : classifyErrorForUser(message, provider);
     await updateAnalysisRow(
       hadValidAnalysis ? "Fehlschlag, alte Analyse bleibt" : "Fehlschlag",
       ticker,
-      failurePatch(hadValidAnalysis, message, classifyErrorForUser(message, provider)),
+      failurePatch(hadValidAnalysis, message, publicMessage, errorCodeFor(e)),
     );
     await writeLastRunError(ticker, message);
     await checkedWrite("request_log", ticker, supabase.from("request_log").update({
@@ -653,6 +672,24 @@ async function runAnalysis(
     // 20260924100500).
     await logFunctionError("analyse", userId, (e as Error).message, provider);
   }
+}
+
+// Code fuer last_run_error_code bei Exceptions, die kein AnalysisAbort sind
+// (praktisch: Fehler des LLM-Anbieters). FMP-Key-Fehler bleiben erkennbar.
+function errorCodeFor(e: unknown): RunErrorCode {
+  if (e instanceof AnalysisAbort) return e.code;
+  const msg = (e as Error).message ?? "";
+  if (msg === "FMP-API-Key ungültig oder abgelaufen.") return "fmp_auth";
+  const lower = msg.toLowerCase();
+  if (lower.includes("429") || lower.includes("rate limit") || lower.includes("rate_limit")) return "llm_rate_limit";
+  return "llm_error";
+}
+
+function jsonResponse(body: unknown, status: number, corsHeaders: Record<string, string>) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 }
 
 // ---------- HTTP-Handler ----------
@@ -731,6 +768,14 @@ Deno.serve(async (req) => {
     });
   }
 
+  // Doppellauf: laeuft fuer den Ticker schon ein Lauf (juenger als 5 Min.),
+  // nicht parallel starten. Vor dem Rate-Limit, damit die Absage nicht
+  // mitzaehlt. Eigener Status 409 + code, der Batch wertet das als
+  // "uebersprungen". Das atomare Belegen unten faengt gleichzeitige Anfragen ab.
+  const alreadyRunning = () =>
+    jsonResponse({ error: `Analyse für ${ticker} läuft bereits.`, code: "already_running" }, 409, corsHeaders);
+  if (isRunActive(existing, Date.now())) return alreadyRunning();
+
   // Rate-Limit NUR fuer echte neue Laeufe (Audit M10) - ein Cache-Treffer
   // oben verbraucht kein FMP-/Claude-Kontingent und zaehlt deshalb bewusst
   // nicht mit. Schuetzt vor versehentlichem oder absichtlichem Ueberlasten
@@ -738,9 +783,10 @@ Deno.serve(async (req) => {
   // force_refresh-Aufrufe, nicht primaer vor fremden Nutzern (die sowieso
   // ihren eigenen Key brauchen).
   if (!(await checkUserRateLimit(user_id, "analyse", MAX_ANALYSES_PER_HOUR))) {
-    return new Response(
-      JSON.stringify({ error: `Zu viele neue Analysen (max. ${MAX_ANALYSES_PER_HOUR}/Stunde). Bitte spaeter erneut versuchen.` }),
-      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    return jsonResponse(
+      { error: `Zu viele neue Analysen (max. ${MAX_ANALYSES_PER_HOUR}/Stunde). Bitte spaeter erneut versuchen.`, code: "rate_limit" },
+      429,
+      corsHeaders,
     );
   }
 
@@ -765,10 +811,30 @@ Deno.serve(async (req) => {
   // bleibt "done" - die alte Analyse bleibt waehrend des Laufs sichtbar.
   // Schlaegt das fehl, nicht starten: sonst wartet das Frontend auf einen
   // Lauf, den es nicht erkennen kann.
-  const runStart = startPatch(hadValidAnalysis, new Date().toISOString());
-  const started = existing
-    ? await updateAnalysisRow("Start", ticker, runStart)
-    : await checkedWrite("Start", ticker, supabase.from("stock_analyses").insert({ ticker, ...runStart }));
+  const nowMs = Date.now();
+  const runStart = startPatch(hadValidAnalysis, new Date(nowMs).toISOString());
+  let started: boolean;
+  if (existing) {
+    // Nur belegen, wenn kein aktiver Lauf eingetragen ist (atomar im UPDATE).
+    const { data: claimed, error } = await supabase.from("stock_analyses")
+      .update(runStart).eq("ticker", ticker).or(runNotActiveFilter(nowMs)).select("ticker");
+    if (error) {
+      // Fallback ohne Sperre, damit ein Filterproblem nie alle Laeufe
+      // blockiert; die Vorpruefung oben greift weiterhin.
+      console.error(`[analyse] DB-Schreibfehler (Start, Sperre) ticker=${ticker}: ${error.message}`);
+      started = await updateAnalysisRow("Start ohne Sperre", ticker, runStart);
+    } else if (!claimed?.length) {
+      return alreadyRunning();
+    } else {
+      started = true;
+    }
+  } else {
+    const { error } = await supabase.from("stock_analyses").insert({ ticker, ...runStart });
+    // 23505: eine parallele Anfrage hat die Zeile gerade angelegt.
+    if (error?.code === "23505") return alreadyRunning();
+    if (error) console.error(`[analyse] DB-Schreibfehler (Start) ticker=${ticker}: ${error.message}`);
+    started = !error;
+  }
   if (!started) {
     return new Response(JSON.stringify({ error: "Analyse konnte nicht gestartet werden. Bitte erneut versuchen." }), {
       status: 500,

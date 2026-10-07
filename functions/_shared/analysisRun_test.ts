@@ -1,7 +1,7 @@
 // Aufruf (aus dem Repo-Root): deno test functions/_shared/analysisRun_test.ts
 // Rein lokal, ohne Netz und ohne DB: die Patches werden auf eine Zeile im
 // Speicher angewendet, so wie UPDATE ... SET sie auf stock_analyses anwendet.
-import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, startPatch } from "./analysisRun.ts";
+import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, isRunActive, runNotActiveFilter, startPatch } from "./analysisRun.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(`Assertion failed: ${msg}`);
@@ -144,4 +144,24 @@ Deno.test("Cache: nur gueltige Analyse juenger als 7 Tage, gemessen an updated_a
   assert(!isCacheFresh({ ...row, status: "error" } as never, 7, now), "status error");
   // Ein laufender oder gescheiterter Refresh aendert die Antwort nicht.
   assert(isCacheFresh({ ...row, last_run_status: "error", last_run_at: NOW } as never, 7, now), "last_run_* egal");
+});
+
+Deno.test("Doppellauf-Sperre: running juenger als 5 Minuten sperrt, aelter nicht", () => {
+  const now = Date.parse(NOW);
+  const at = (minAgo: number) => new Date(now - minAgo * 60_000).toISOString();
+  assert(isRunActive({ last_run_status: "running", last_run_at: at(1) }, now), "1 Min. -> gesperrt");
+  assert(!isRunActive({ last_run_status: "running", last_run_at: at(6) }, now), "6 Min. -> frei");
+  assert(!isRunActive({ last_run_status: "done", last_run_at: at(1) }, now), "done -> frei");
+  assert(!isRunActive({ last_run_status: null, last_run_at: null }, now), "alte Zeile -> frei");
+  assert(!isRunActive(null, now), "keine Zeile -> frei");
+  const f = runNotActiveFilter(now);
+  assert(f.includes(`last_run_at.lt."${at(5)}"`), f);
+  assert(f.startsWith("last_run_status.is.null,last_run_status.neq.running"), f);
+});
+
+Deno.test("Fehlercode: Fehlschlag und unvollstaendiger Lauf setzen last_run_error_code, Erfolg leert ihn", () => {
+  assert(failurePatch(true, "x", "y", "fmp_rate_limit").last_run_error_code === "fmp_rate_limit", "mit alter Analyse");
+  assert(failurePatch(false, "x", "y", "fmp_plan").last_run_error_code === "fmp_plan", "ohne alte Analyse");
+  assert(completionPatch(newResult(false), false, true).last_run_error_code === "score_incomplete", "unvollstaendig");
+  assert(completionPatch(newResult(true), true, true).last_run_error_code === null, "Erfolg");
 });
