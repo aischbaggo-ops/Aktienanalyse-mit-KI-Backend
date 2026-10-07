@@ -9,6 +9,9 @@ export const BENCHMARK_SYMBOL = "^GSPC";
 
 export type NewsStatus = "ok" | "blocked" | "error" | "empty";
 
+// Herkunft der News eines Laufs (siehe news.ts). Neue Quellen hier ergaenzen.
+export type NewsSource = "fmp";
+
 // Form des Ergebnisses von fmpGet() (analyse/index.ts).
 export interface FmpResultLike {
   ok?: boolean;
@@ -77,6 +80,7 @@ export const METHODIK_VERSION = 1;
 
 export interface DataFlags {
   news_status: NewsStatus;
+  news_source: NewsSource;
   news_count: number;
   price_points: number;
   estimates_count: number;
@@ -103,6 +107,7 @@ export function llmRecoveredFrom(runs: ReadonlyArray<EmbeddedRecoveryLike | null
 
 export function buildDataFlags(input: {
   newsStatus: NewsStatus;
+  newsSource?: NewsSource;
   availability: { news: number; priceStock: number; estimates: number };
   balanceRows: any[];
   incomeRows: any[];
@@ -111,6 +116,7 @@ export function buildDataFlags(input: {
 }): DataFlags {
   return {
     news_status: input.newsStatus,
+    news_source: input.newsSource ?? "fmp",
     news_count: input.availability.news,
     price_points: input.availability.priceStock,
     estimates_count: input.availability.estimates,
