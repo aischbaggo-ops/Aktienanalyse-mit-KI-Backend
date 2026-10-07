@@ -21,10 +21,12 @@ import { resolveFmpSymbol } from "../_shared/tickerCheck.ts";
 // Scratchpad M1). BEWUSST hoeher als der dort genannte Beispielwert
 // (20/Stunde): das Batch-Auswahl-Feature erlaubt bis zu 100 Ticker in
 // einem einzigen Lauf - 20/Stunde wuerde jeden Batch-Lauf ueber 20 nicht
-// gecachte Ticker mitten im Lauf mit 429 abbrechen. 120 laesst einen
+// gecachte Ticker mitten im Lauf mit 429 abbrechen. 150 laesst einen
 // vollen 100er-Batch plus etwas Spielraum fuer normale Einzelanalysen in
-// derselben Stunde zu.
-const MAX_ANALYSES_PER_HOUR = 120;
+// derselben Stunde zu und liegt ueber dem Takt des Batch (30 s Abstand =
+// 120 Starts pro Stunde), damit auch ein Lauf mit ueberwiegend neuen Tickern
+// nicht an die Grenze stoesst.
+const MAX_ANALYSES_PER_HOUR = 150;
 
 // Anzeigename je Anbieter fuer Fehlermeldungen - gleiche Bezeichnungen wie
 // im Frontend (KontoPage: "Claude (Standard) / ChatGPT / Gemini /
