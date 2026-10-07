@@ -1,6 +1,9 @@
 import { corsFor } from "../_shared/cors.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
+import { logApiCall } from "../_shared/apiCallLog.ts";
+import { checkTickers, failureMessage } from "../_shared/tickerCheck.ts";
+import type { FmpResultLike } from "../_shared/fmpStatus.ts";
 
 // Prueft eine Liste von Ticker-KANDIDATEN (z.B. aus dem Freitext-Parser,
 // siehe tickerParser.ts) gegen echte FMP-Profildaten, BEVOR sie in einen
@@ -9,13 +12,12 @@ import { loadUserApiKeys } from "../_shared/userKeys.ts";
 // Firmennamen-Fragmente wie "WALLETUSD" unbesehen - die landeten dann als
 // Muell-Eintraege in "Letzte Analysen" (reales Testfeedback).
 //
-// EIN Bulk-FMP-Call statt N Einzelaufrufe: /profile akzeptiert mehrere
-// kommagetrennte Symbole in einer Anfrage und liefert nur die tatsaechlich
-// existierenden zurueck (unbekannte Symbole werden schlicht weggelassen,
-// kein Fehler) - dasselbe Verhalten, auf dem analyse/index.ts's fmpGet()
-// fuer den Einzel-Ticker-Fall bereits aufbaut. Vermeidet ausserdem, das
-// bestehende Rate-Limit von symbol-search (60/Stunde) mit bis zu
-// MAX_BATCH_SIZE=100 Einzelsuchen pro Klick zu sprengen.
+// Einzelabfragen /profile?symbol=X (begrenzt parallel) statt einer
+// Sammelabfrage mit kommagetrennten Symbolen: die Sammelabfrage lieferte
+// keine verwertbare Trefferliste mehr, "Ticker erkennen" verwarf deshalb
+// ALLE Eintraege (siehe _shared/tickerCheck.ts). Bei bis zu 100 Tickern sind
+// das 100 Aufrufe, weit unter 3.000/min (Ultimate) - und kein Aufruf geht
+// ueber symbol-search (60/Stunde).
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const MAX_TICKERS = 100;
 
@@ -62,27 +64,54 @@ Deno.serve(async (req) => {
   }
 
   // Validierung ist ein ZUSATZ-Schutz, kein harter Blocker fuer den Rest der
-  // App - schlaegt der FMP-Call selbst fehl (Netzwerk, ungueltiger Key),
-  // bekommt der Client einen klaren Fehler und entscheidet selbst, ob er
-  // ungeprueft fortfaehrt, statt dass ein FMP-Ausfall die gesamte
-  // Batch-Funktion lahmlegt.
+  // App - schlaegt die Pruefung fehl (Netzwerk, Key, Plan, Limit, keine
+  // verwertbare Antwort), bekommt der Client einen klaren Fehler und
+  // entscheidet selbst, ob er ungeprueft fortfaehrt, statt dass ein
+  // FMP-Problem die gesamte Batch-Funktion lahmlegt.
+  const startedAt = Date.now();
+  // Diagnose: Status + Anfang der ersten Antwort ohne Treffer (max. 300
+  // Zeichen; der Key steht nie im Body, wird aber trotzdem geschwaerzt).
+  let sample: string | null = null;
+  const fetchProfile = async (symbol: string): Promise<FmpResultLike> => {
+    const url = `${FMP_BASE}/profile?symbol=${encodeURIComponent(symbol)}&apikey=${fmpKey}`;
+    let res: Response;
+    try {
+      res = await fetch(url);
+    } catch (e) {
+      return { ok: false, status: null, error: (e as Error).message };
+    }
+    const text = await res.text().catch(() => "");
+    let data: unknown = text;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Klartext-Antwort (z. B. "Restricted"): bleibt als String.
+    }
+    if (!(Array.isArray(data) && data.length > 0) && sample === null) {
+      sample = `${symbol} -> HTTP ${res.status}: ${text.replace(/apikey=[^&\s"]+/gi, "apikey=***").slice(0, 300)}`;
+    }
+    return { ok: res.ok, data, status: res.status, authError: res.status === 401 || res.status === 403 };
+  };
+
   try {
-    const url = `${FMP_BASE}/profile?symbol=${tickers.map(encodeURIComponent).join(",")}&apikey=${fmpKey}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      return new Response(JSON.stringify({ error: `FMP-Antwort ${res.status}` }), {
+    const r = await checkTickers(tickers, fetchProfile);
+    await logApiCall({
+      functionName: "validate-tickers",
+      provider: "fmp",
+      callType: "/profile (Einzelabfragen)",
+      success: r.failure === null,
+      durationMs: Date.now() - startedAt,
+      errorMessage: `symbole=${tickers.length}; treffer=${r.valid.length}; aufrufe=${r.calls}; fehler=${r.failure ?? "-"}${
+        r.failureStatus ? `; status=${r.failureStatus}` : ""
+      }${sample && (r.failure || r.valid.length < tickers.length) ? `; probe=${sample}` : ""}`,
+    });
+    if (r.failure) {
+      return new Response(JSON.stringify({ error: failureMessage(r.failure, r.failureStatus), code: r.failure }), {
         status: 502,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const data = await res.json();
-    const validSymbols = new Set(
-      (Array.isArray(data) ? data : [])
-        .map((p: any) => String(p?.symbol ?? "").toUpperCase())
-        .filter((s: string) => s.length > 0),
-    );
-    const valid = tickers.filter((t) => validSymbols.has(t));
-    return new Response(JSON.stringify({ valid }), {
+    return new Response(JSON.stringify({ valid: r.valid, fmp_symbols: r.fmpSymbols }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {

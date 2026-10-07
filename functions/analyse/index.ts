@@ -15,6 +15,7 @@ import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, isRunActive, runNotActiveFilter, startPatch } from "../_shared/analysisRun.ts";
 import { AnalysisAbort, preLlmAbort, profileAbort, rateLimitAbort, type RunErrorCode } from "../_shared/fmpStatus.ts";
+import { resolveFmpSymbol } from "../_shared/tickerCheck.ts";
 
 // Rate-Limit fuer neue Analyse-Laeufe (Audit M10 / urspruenglich Pentest-
 // Scratchpad M1). BEWUSST hoeher als der dort genannte Beispielwert
@@ -173,24 +174,28 @@ async function fmpGet(path: string, fmpKey: string, ticker: string) {
 }
 
 async function fetchFmpData(ticker: string, fmpKey: string) {
-  const [stockOld, stockNew] = priceHistoryPaths(ticker);
+  // Aktiengattungen (BRK.B / BRK-B): FMP kennt je nach Endpunkt nur eine
+  // Schreibweise. Nur bei solchen Tickern ein Vorab-Profilaufruf; gespeichert
+  // und angezeigt wird weiter die Eingabe, nur die FMP-Aufrufe nutzen sym.
+  const sym = await resolveFmpSymbol(ticker, (s) => fmpGet(`/profile?symbol=${encodeURIComponent(s)}`, fmpKey, ticker));
+  const [stockOld, stockNew] = priceHistoryPaths(sym);
   const [indexOld, indexNew] = priceHistoryPaths(BENCHMARK_SYMBOL);
   const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStockOld, priceStockNew, priceIndexOld, priceIndexNew, scores, priceTargetSummary, grades] = await Promise.all([
-    fmpGet(`/profile?symbol=${ticker}`, fmpKey, ticker),
-    fmpGet(`/stock-peers?symbol=${ticker}`, fmpKey, ticker),
-    fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
-    fmpGet(`/balance-sheet-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
-    fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
-    fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey, ticker),
-    fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey, ticker),
-    fetchNews(ticker, (path) => fmpGet(path, fmpKey, ticker)),
+    fmpGet(`/profile?symbol=${sym}`, fmpKey, ticker),
+    fmpGet(`/stock-peers?symbol=${sym}`, fmpKey, ticker),
+    fmpGet(`/income-statement?symbol=${sym}&period=annual&limit=5`, fmpKey, ticker),
+    fmpGet(`/balance-sheet-statement?symbol=${sym}&period=annual&limit=5`, fmpKey, ticker),
+    fmpGet(`/cash-flow-statement?symbol=${sym}&period=annual&limit=5`, fmpKey, ticker),
+    fmpGet(`/analyst-estimates?symbol=${sym}&period=annual&limit=4`, fmpKey, ticker),
+    fmpGet(`/discounted-cash-flow?symbol=${sym}`, fmpKey, ticker),
+    fetchNews(sym, (path) => fmpGet(path, fmpKey, ticker)),
     fmpGet(stockOld, fmpKey, ticker),
     fmpGet(stockNew, fmpKey, ticker),
     fmpGet(indexOld, fmpKey, ticker),
     fmpGet(indexNew, fmpKey, ticker),
-    fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey, ticker),
-    fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey, ticker),
-    fmpGet(`/grades?symbol=${ticker}`, fmpKey, ticker),
+    fmpGet(`/financial-scores?symbol=${sym}`, fmpKey, ticker),
+    fmpGet(`/price-target-summary?symbol=${sym}`, fmpKey, ticker),
+    fmpGet(`/grades?symbol=${sym}`, fmpKey, ticker),
   ]);
   const priceStock = mergePriceResults(priceStockOld, priceStockNew);
   const priceIndex = mergePriceResults(priceIndexOld, priceIndexNew);
