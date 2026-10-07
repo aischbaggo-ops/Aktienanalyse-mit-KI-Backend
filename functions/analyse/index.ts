@@ -13,6 +13,7 @@ import { BENCHMARK_SYMBOL, buildDataFlags, fmpAuthErrorExcludingNews, llmRecover
 import { fetchNews } from "../_shared/news.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
+import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, startPatch } from "../_shared/analysisRun.ts";
 
 // Rate-Limit fuer neue Analyse-Laeufe (Audit M10 / urspruenglich Pentest-
 // Scratchpad M1). BEWUSST hoeher als der dort genannte Beispielwert
@@ -90,6 +91,37 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
+
+// supabase-js wirft bei DB-Fehlern nicht, sondern liefert {error} zurueck.
+// Frueher wurde das bei den Schreibzugriffen teils ignoriert - jetzt wird
+// jeder Fehler mit Kontext geloggt. Rueckgabe true = geschrieben.
+async function checkedWrite(
+  context: string,
+  ticker: string,
+  op: PromiseLike<{ error: { message: string } | null }>,
+): Promise<boolean> {
+  const { error } = await op;
+  if (error) console.error(`[analyse] DB-Schreibfehler (${context}) ticker=${ticker}: ${error.message}`);
+  return !error;
+}
+
+function updateAnalysisRow(context: string, ticker: string, patch: Record<string, unknown>) {
+  return checkedWrite(context, ticker, supabase.from("stock_analyses").update(patch).eq("ticker", ticker));
+}
+
+// Interner Fehlertext des letzten Laufs, nur fuer Admins lesbar (siehe
+// Migration 20261007100000). null nach einem erfolgreichen Lauf.
+function writeLastRunError(ticker: string, error: string | null) {
+  return checkedWrite(
+    "stock_analyses_last_run_error",
+    ticker,
+    supabase.from("stock_analyses_last_run_error").upsert({
+      ticker,
+      last_run_error: error,
+      updated_at: new Date().toISOString(),
+    }),
+  );
+}
 
 async function fmpGet(path: string, fmpKey: string, ticker: string) {
   const startedAt = Date.now();
@@ -188,6 +220,10 @@ async function runAnalysis(
   llmApiKey: string,
   llmModel: string | null,
   adminContext: string | null,
+  // Lag beim Start eine gueltige Analyse vor (status "done" mit Gesamtscore)?
+  // Im Handler VOR dem Setzen von last_run_status ermittelt. Dann ersetzt
+  // nur ein erfolgreicher Lauf die Daten, ein Fehlschlag laesst sie stehen.
+  hadValidAnalysis: boolean,
 ) {
   // Log-Marker fuer Pruefpunkt 3 ("Logs nach dem ersten Testlauf ansehen"):
   // Wenn diese Zeile in Supabase -> Edge Functions -> Logs auftaucht, NACHDEM
@@ -557,21 +593,26 @@ async function runAnalysis(
         : "Die Analyse konnte nicht vollständig berechnet werden. Bitte versuche es erneut.",
     };
 
-    await supabase.from("stock_analyses").update(result).eq("ticker", ticker);
+    await updateAnalysisRow(
+      isComplete ? "Ergebnis" : hadValidAnalysis ? "unvollstaendig, alte Analyse bleibt" : "unvollstaendig",
+      ticker,
+      completionPatch(result, isComplete, hadValidAnalysis),
+    );
+    await writeLastRunError(ticker, isComplete ? null : result.error_message);
 
     // Kosten/Token-Zahlen bewusst NICHT im geteilten stock_analyses-Cache
     // (siehe migrations/20260924120000_hide_stock_analyses_costs.sql,
     // Pentest-Fix) - eigene admin-only Tabelle statt allen Nutzern
     // sichtbarer Spalten.
-    await supabase.from("stock_analyses_costs").upsert({
+    await checkedWrite("stock_analyses_costs", ticker, supabase.from("stock_analyses_costs").upsert({
       ticker,
       tokens_input: tokensInput,
       tokens_output: tokensOutput,
       cost_usd_claude: Math.round(costUsd * 1_000_000) / 1_000_000,
       updated_at: new Date().toISOString(),
-    });
+    }));
 
-    await supabase.from("request_log").update({
+    await checkedWrite("request_log", ticker, supabase.from("request_log").update({
       status: result.error_message ? "error" : "done",
       duration_ms: Date.now() - startedAt,
       error_message: result.error_message,
@@ -584,36 +625,29 @@ async function runAnalysis(
       score_stabilitaet: result.score_stabilitaet,
       deviation_triggered: needsCheck,
       deviation_amount: deviation !== null ? Math.round(deviation * 10) / 10 : null,
-    }).eq("id", logId);
+    }).eq("id", logId));
 
-    console.log(`[analyse] background run finished ticker=${ticker} logId=${logId} status=${result.status} durationMs=${Date.now() - startedAt}`);
+    console.log(`[analyse] background run finished ticker=${ticker} logId=${logId} status=${result.status} keptValid=${!isComplete && hadValidAnalysis} durationMs=${Date.now() - startedAt}`);
   } catch (e) {
     console.error(`[analyse] background run FAILED ticker=${ticker} logId=${logId}:`, e);
-    // Score/Kriterien/Fazit MIT zuruecksetzen, nicht nur status/error_message:
-    // stock_analyses ist eine pro-Ticker-Cache-Zeile, die bei einem erneuten
-    // Lauf per UPDATE (nicht INSERT) geschrieben wird - ohne dieses
-    // Zuruecksetzen blieb bei einem fehlgeschlagenen ERNEUTEN Lauf der Score
-    // eines FRUEHEREN erfolgreichen Laufs sichtbar stehen, obwohl status
-    // gleichzeitig "error" zeigte (reales Nutzerfeedback: NVDA zeigte Status
-    // "Fehler" UND Score 70 gleichzeitig in "Letzte Analysen"). status:"error"
-    // muss immer eindeutig "kein verwertbares Ergebnis" bedeuten.
-    await supabase.from("stock_analyses").update({
-      status: "error",
-      error_message: (e as Error).message,
-      error_message_public: classifyErrorForUser((e as Error).message, provider),
-      score_total: null,
-      score_fundamental: null,
-      score_qualitaet: null,
-      score_krise: null,
-      score_trend: null,
-      score_stabilitaet: null,
-      criteria: null,
-      warnings: null,
-      fazit: null,
-    }).eq("ticker", ticker);
-    await supabase.from("request_log").update({
-      status: "error", duration_ms: Date.now() - startedAt, error_message: (e as Error).message,
-    }).eq("id", logId);
+    // Ohne gueltige Analyse wie bisher: status "error", Score/Kriterien/Fazit
+    // MIT zuruecksetzen. stock_analyses ist eine Zeile pro Ticker, die per
+    // UPDATE geschrieben wird - sonst blieb bei einem fehlgeschlagenen
+    // ERNEUTEN Lauf ein alter Score neben status "error" stehen (reales
+    // Nutzerfeedback: NVDA zeigte "Fehler" UND Score 70 in "Letzte
+    // Analysen"). status "error" heisst immer "kein verwertbares Ergebnis".
+    // Mit gueltiger Analyse (Ticket f) bleibt sie dagegen vollstaendig
+    // erhalten (status "done"), nur last_run_* zeigt den Fehlschlag.
+    const message = (e as Error).message;
+    await updateAnalysisRow(
+      hadValidAnalysis ? "Fehlschlag, alte Analyse bleibt" : "Fehlschlag",
+      ticker,
+      failurePatch(hadValidAnalysis, message, classifyErrorForUser(message, provider)),
+    );
+    await writeLastRunError(ticker, message);
+    await checkedWrite("request_log", ticker, supabase.from("request_log").update({
+      status: "error", duration_ms: Date.now() - startedAt, error_message: message,
+    }).eq("id", logId));
     // llm_provider mitloggen - bei Fehlern sofort erkennbar, welcher
     // Anbieter betroffen war (Pentest-Scratchpad-Muster, siehe Migration
     // 20260924100500).
@@ -670,20 +704,28 @@ Deno.serve(async (req) => {
     adminContext = body.admin_chat_context.trim().slice(-MAX_ADMIN_CONTEXT_CHARS);
   }
 
-  const { data: existingRows } = await supabase.from("stock_analyses").select("*").eq("ticker", ticker).limit(1);
+  const { data: existingRows, error: existingError } = await supabase.from("stock_analyses").select("*").eq("ticker", ticker).limit(1);
+  if (existingError) {
+    // Ohne den bisherigen Stand laesst sich nicht entscheiden, ob eine
+    // gueltige Analyse geschuetzt werden muss - dann lieber nicht starten.
+    console.error(`[analyse] DB-Lesefehler (stock_analyses) ticker=${ticker}: ${existingError.message}`);
+    return new Response(JSON.stringify({ error: "Analyse konnte nicht gestartet werden. Bitte erneut versuchen." }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
   const existing = existingRows?.[0] ?? null;
 
-  let isFresh = false;
-  if (existing && existing.status === "done" && existing.score_total != null && !force_refresh) {
-    const ageMs = Date.now() - new Date(existing.updated_at).getTime();
-    isFresh = ageMs <= max_age_days * 24 * 60 * 60 * 1000;
-  }
+  // Gueltige Analyse = status "done" mit Gesamtscore. Hier ermittelt, bevor
+  // der Lauf last_run_status setzt, und an runAnalysis() durchgereicht.
+  const hadValidAnalysis = hasValidAnalysis(existing);
+  const isFresh = !force_refresh && isCacheFresh(existing, max_age_days, Date.now());
 
   // Cache-Treffer brauchen keinen externen API-Aufruf und damit auch
   // keinen eigenen Key - nur der "processing"-Pfad unten (echter neuer
   // Lauf) verbraucht FMP/Claude-Kontingent des Nutzers.
   if (isFresh) {
-    await supabase.from("request_log").insert({ ticker, user_id, source: "cache", max_age_days, force_refresh });
+    await checkedWrite("request_log", ticker, supabase.from("request_log").insert({ ticker, user_id, source: "cache", max_age_days, force_refresh }));
     return new Response(JSON.stringify({ source: "cache", ticker, analysis: existing }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -718,16 +760,33 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Status auf running setzen (legt Zeile an, falls sie noch nicht existiert)
-  if (existing) {
-    await supabase.from("stock_analyses").update({ status: "running" }).eq("ticker", ticker);
-  } else {
-    await supabase.from("stock_analyses").insert({ ticker, status: "running" });
+  // Lauf als "running" markieren (legt die Zeile an, falls sie noch nicht
+  // existiert). Mit gueltiger Analyse nur last_run_status/last_run_at, status
+  // bleibt "done" - die alte Analyse bleibt waehrend des Laufs sichtbar.
+  // Schlaegt das fehl, nicht starten: sonst wartet das Frontend auf einen
+  // Lauf, den es nicht erkennen kann.
+  const runStart = startPatch(hadValidAnalysis, new Date().toISOString());
+  const started = existing
+    ? await updateAnalysisRow("Start", ticker, runStart)
+    : await checkedWrite("Start", ticker, supabase.from("stock_analyses").insert({ ticker, ...runStart }));
+  if (!started) {
+    return new Response(JSON.stringify({ error: "Analyse konnte nicht gestartet werden. Bitte erneut versuchen." }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 
-  const { data: logRow } = await supabase.from("request_log").insert({
+  const { data: logRow, error: logError } = await supabase.from("request_log").insert({
     ticker, user_id, source: "processing", max_age_days, force_refresh,
   }).select().single();
+  if (logError || !logRow) {
+    console.error(`[analyse] DB-Schreibfehler (request_log) ticker=${ticker}: ${logError?.message ?? "keine Zeile"}`);
+    await updateAnalysisRow("Start abgebrochen", ticker, failurePatch(hadValidAnalysis, "request_log-Eintrag fehlgeschlagen", null));
+    return new Response(JSON.stringify({ error: "Analyse konnte nicht gestartet werden. Bitte erneut versuchen." }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
 
   const startedAt = Date.now();
 
@@ -737,7 +796,7 @@ Deno.serve(async (req) => {
   // Sofort antworten, danach im Hintergrund weiterlaufen (Supabase-eigenes
   // Aequivalent zum n8n "fire and continue"-Muster).
   // @ts-ignore: EdgeRuntime ist eine Supabase-spezifische globale API
-  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, user_id, fmpKey, provider, llmApiKey, llmModel, adminContext));
+  EdgeRuntime.waitUntil(runAnalysis(ticker, logRow!.id, startedAt, user_id, fmpKey, provider, llmApiKey, llmModel, adminContext, hadValidAnalysis));
 
   return new Response(JSON.stringify({ source: "processing", ticker, status: "running" }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
