@@ -8,6 +8,7 @@ import { requireAdmin } from "../_shared/adminGate.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
+import { mergePriceResults, priceHistoryPaths } from "../_shared/priceHistory.ts";
 import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus, fmpAuthErrorExcludingNews } from "../_shared/dataFlags.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
@@ -141,7 +142,9 @@ async function fmpGet(path: string, fmpKey: string, ticker: string) {
 }
 
 async function fetchFmpData(ticker: string, fmpKey: string) {
-  const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades] = await Promise.all([
+  const [stockOld, stockNew] = priceHistoryPaths(ticker);
+  const [indexOld, indexNew] = priceHistoryPaths(BENCHMARK_SYMBOL);
+  const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStockOld, priceStockNew, priceIndexOld, priceIndexNew, scores, priceTargetSummary, grades] = await Promise.all([
     fmpGet(`/profile?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/stock-peers?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/income-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
@@ -150,12 +153,16 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
     fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey, ticker),
     fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey, ticker),
-    fmpGet(`/historical-price-eod/full?symbol=${ticker}&from=2000-01-01`, fmpKey, ticker),
-    fmpGet(`/historical-price-eod/full?symbol=${encodeURIComponent(BENCHMARK_SYMBOL)}&from=2000-01-01`, fmpKey, ticker),
+    fmpGet(stockOld, fmpKey, ticker),
+    fmpGet(stockNew, fmpKey, ticker),
+    fmpGet(indexOld, fmpKey, ticker),
+    fmpGet(indexNew, fmpKey, ticker),
     fmpGet(`/financial-scores?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/price-target-summary?symbol=${ticker}`, fmpKey, ticker),
     fmpGet(`/grades?symbol=${ticker}`, fmpKey, ticker),
   ]);
+  const priceStock = mergePriceResults(priceStockOld, priceStockNew);
+  const priceIndex = mergePriceResults(priceIndexOld, priceIndexNew);
   // Ein einziger ungueltiger Key betrifft alle Aufrufe gleichermassen (selber
   // Key fuer alle) - ein Treffer reicht, um den Lauf als Key-Fehler statt als
   // Datenluecke einzuordnen. Der News-Endpunkt zaehlt bewusst NICHT mit: eine
