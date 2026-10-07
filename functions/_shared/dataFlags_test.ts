@@ -6,6 +6,8 @@ import {
   buildNewsSummary,
   classifyNewsStatus,
   fmpAuthErrorExcludingNews,
+  llmRecoveredFrom,
+  METHODIK_VERSION,
   reportedCurrencyFrom,
 } from "./dataFlags.ts";
 
@@ -100,4 +102,41 @@ Deno.test("news_status: JSON-Fehlerbody ist blocked, 429 und 5xx bleiben error",
   assert(classifyNewsStatus({ ok: false, data: { error: "bad" }, status: 400 }) === "blocked", "400 + JSON");
   assert(classifyNewsStatus({ ok: false, data: { "Error Message": "Restricted" }, status: 429 }) === "error", "429 zuerst");
   assert(classifyNewsStatus({ ok: false, data: { message: "x" }, status: 503 }) === "error", "503 zuerst");
+});
+
+Deno.test("methodik_version: jede neue Zeile traegt Version 1", () => {
+  const f = buildDataFlags({
+    newsStatus: "ok",
+    availability: { news: 3, priceStock: 5000, estimates: 4 },
+    balanceRows: [],
+    incomeRows: [],
+  });
+  assert(METHODIK_VERSION === 1, "Konstante ist 1");
+  assert(f.methodik_version === 1, "methodik_version = 1");
+});
+
+Deno.test("llm_recovered: Standard false, true nur wenn gesetzt", () => {
+  const base = {
+    newsStatus: "ok" as const,
+    availability: { news: 0, priceStock: 0, estimates: 0 },
+    balanceRows: [],
+    incomeRows: [],
+  };
+  assert(buildDataFlags(base).llm_recovered === false, "Standard false");
+  assert(buildDataFlags({ ...base, llmRecovered: true }).llm_recovered === true, "true durchgereicht");
+});
+
+Deno.test("llmRecoveredFrom: false ohne Befund, true bei uebernommenem Feld oder gekuerztem Text", () => {
+  assert(llmRecoveredFrom([]) === false, "keine Laeufe");
+  assert(llmRecoveredFrom([null, undefined]) === false, "kein Befund");
+  assert(llmRecoveredFrom([{ adopted: {}, cleanText: {} }]) === false, "leerer Befund");
+  assert(llmRecoveredFrom([{ adopted: { kriterien: [] }, cleanText: {} }]) === true, "Feld uebernommen");
+  assert(llmRecoveredFrom([{ adopted: {}, cleanText: { fazit: "x" } }]) === true, "Text gekuerzt");
+});
+
+Deno.test("llmRecoveredFrom: Kontrolllauf zaehlt mit", () => {
+  const clean = { adopted: {}, cleanText: {} };
+  const recovered = { adopted: { swot: {} }, cleanText: {} };
+  assert(llmRecoveredFrom([clean, recovered]) === true, "nur der zweite Lauf hat repariert");
+  assert(llmRecoveredFrom([clean, clean]) === false, "beide sauber");
 });
