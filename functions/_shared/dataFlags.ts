@@ -75,8 +75,9 @@ export function reportedCurrencyFrom(balanceRows: any[], incomeRows: any[]): str
 // Version der Bewertungsmethodik, mit der eine Zeile entstand. Zeilen ohne das
 // Feld (vor diesem Deploy) gelten als Version 1 (siehe View analysis_ranking).
 // Erhoehen, sobald eine Aenderung Scores aelterer Zeilen nicht mehr
-// vergleichbar macht.
-export const METHODIK_VERSION = 1;
+// vergleichbar macht. Version 2: Kurshistorie in zwei Fenstern ab 2000 (PR #35,
+// Dotcom-Phase jetzt enthalten) aendert Krise- und Trend-Score.
+export const METHODIK_VERSION = 2;
 
 export interface DataFlags {
   news_status: NewsStatus;
