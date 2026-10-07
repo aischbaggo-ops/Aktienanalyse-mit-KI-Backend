@@ -162,3 +162,38 @@ Deno.test("Trend-Ampel: ohne Phase ueber 7 Jahre bleibt das Verhaeltnis massgebl
   const a = unterwasserAmpel(stock, index);
   assert(a === 1, `Verhaeltnis < 0,8 -> gruen (1), war ${a}`);
 });
+
+// Monatskurse von fromYear bis 2026-09, leicht steigend mit Dellen.
+function monthlyFrom(fromYear: number, toYear = 2026): { date: string; close: number }[] {
+  const rows: { date: string; close: number }[] = [];
+  for (let y = fromYear; y <= toYear; y++) {
+    for (let m = 1; m <= 12; m++) {
+      if (y === toYear && m > 9) break;
+      const i = rows.length;
+      rows.push({ date: `${y}-${String(m).padStart(2, "0")}-15`, close: 100 + i * 0.5 + (i % 7 === 0 ? -10 : 0) });
+    }
+  }
+  return rows;
+}
+
+Deno.test("Krise/Trend: keine Kurse der Aktie -> beide Scores null statt neutral", () => {
+  const s = computeScores(fmpInput([], monthlyFrom(2000)));
+  assert(s.krise.score === null, `Krise null, war ${s.krise.score}`);
+  assert(s.trend.score === null, `Trend null, war ${s.trend.score}`);
+  assert(s.krise.crisisDetail.every((c: any) => c.a === 0.5), "Fenster selbst bleiben neutral");
+});
+
+Deno.test("Krise/Trend: zu kurze Kursreihe (wenige Tage, kein Krisenfenster) -> null", () => {
+  const s = computeScores(fmpInput([{ date: "2026-09-01", close: 10 }, { date: "2026-09-02", close: 11 }], monthlyFrom(2000)));
+  assert(s.krise.score === null, `Krise null, war ${s.krise.score}`);
+  assert(s.trend.score === null, `Trend null, war ${s.trend.score}`);
+});
+
+Deno.test("Krise: nur Dotcom fehlt -> dieses Fenster 0,5, Score bleibt berechnet", () => {
+  const s = computeScores(fmpInput(monthlyFrom(2003), monthlyFrom(2000)));
+  const dotcom = s.krise.crisisDetail.find((c: any) => c.name === "Dotcom");
+  assert(dotcom?.ddStock === null && dotcom?.a === 0.5, "Dotcom neutral");
+  assert(s.krise.crisisDetail.filter((c: any) => c.ddStock !== null).length === 4, "uebrige Fenster mit Daten");
+  assert(typeof s.krise.score === "number", `Krise berechnet, war ${s.krise.score}`);
+  assert(typeof s.trend.score === "number", `Trend berechnet, war ${s.trend.score}`);
+});
