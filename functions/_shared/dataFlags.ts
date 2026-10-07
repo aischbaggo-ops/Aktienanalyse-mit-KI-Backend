@@ -9,6 +9,9 @@ export const BENCHMARK_SYMBOL = "^GSPC";
 
 export type NewsStatus = "ok" | "blocked" | "error" | "empty";
 
+// Herkunft der News eines Laufs (siehe news.ts). Neue Quellen hier ergaenzen.
+export type NewsSource = "fmp";
+
 // Form des Ergebnisses von fmpGet() (analyse/index.ts).
 export interface FmpResultLike {
   ok?: boolean;
@@ -69,28 +72,58 @@ export function reportedCurrencyFrom(balanceRows: any[], incomeRows: any[]): str
   return null;
 }
 
+// Version der Bewertungsmethodik, mit der eine Zeile entstand. Zeilen ohne das
+// Feld (vor diesem Deploy) gelten als Version 1 (siehe View analysis_ranking).
+// Erhoehen, sobald eine Aenderung Scores aelterer Zeilen nicht mehr
+// vergleichbar macht. Version 2: Kurshistorie in zwei Fenstern ab 2000 (PR #35,
+// Dotcom-Phase jetzt enthalten) aendert Krise- und Trend-Score.
+export const METHODIK_VERSION = 2;
+
 export interface DataFlags {
   news_status: NewsStatus;
+  news_source: NewsSource;
   news_count: number;
   price_points: number;
   estimates_count: number;
   reported_currency: string | null;
   benchmark_symbol: string;
+  methodik_version: number;
+  // true: Das Fangnetz fuer eingebettete Tool-Felder (rescueEmbeddedFields) hat
+  // bei diesem Lauf Felder uebernommen oder einen Anzeigetext gekuerzt.
+  llm_recovered: boolean;
+}
+
+// Form des Befunds aus rescueEmbeddedFields() (nur die hier gelesenen Felder,
+// damit diese Datei ohne Import aus llm/ rein bleibt).
+export interface EmbeddedRecoveryLike {
+  adopted?: Record<string, unknown>;
+  cleanText?: Record<string, unknown>;
+}
+
+// Ein Lauf kann zwei LLM-Aufrufe haben (Kontrolllauf): true, wenn bei einem
+// davon das Fangnetz etwas veraendert hat.
+export function llmRecoveredFrom(runs: ReadonlyArray<EmbeddedRecoveryLike | null | undefined>): boolean {
+  return runs.some((r) => !!r && (Object.keys(r.adopted ?? {}).length > 0 || Object.keys(r.cleanText ?? {}).length > 0));
 }
 
 export function buildDataFlags(input: {
   newsStatus: NewsStatus;
+  newsSource?: NewsSource;
   availability: { news: number; priceStock: number; estimates: number };
   balanceRows: any[];
   incomeRows: any[];
   benchmarkSymbol?: string;
+  llmRecovered?: boolean;
 }): DataFlags {
   return {
     news_status: input.newsStatus,
+    news_source: input.newsSource ?? "fmp",
     news_count: input.availability.news,
     price_points: input.availability.priceStock,
     estimates_count: input.availability.estimates,
     reported_currency: reportedCurrencyFrom(input.balanceRows, input.incomeRows),
     benchmark_symbol: input.benchmarkSymbol ?? BENCHMARK_SYMBOL,
+    methodik_version: METHODIK_VERSION,
+    llm_recovered: input.llmRecovered ?? false,
   };
 }

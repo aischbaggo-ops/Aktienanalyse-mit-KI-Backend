@@ -9,7 +9,8 @@ import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
 import { mergePriceResults, priceHistoryPaths } from "../_shared/priceHistory.ts";
-import { BENCHMARK_SYMBOL, buildDataFlags, classifyNewsStatus, fmpAuthErrorExcludingNews } from "../_shared/dataFlags.ts";
+import { BENCHMARK_SYMBOL, buildDataFlags, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
+import { fetchNews } from "../_shared/news.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 
@@ -152,7 +153,7 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
     fmpGet(`/cash-flow-statement?symbol=${ticker}&period=annual&limit=5`, fmpKey, ticker),
     fmpGet(`/analyst-estimates?symbol=${ticker}&period=annual&limit=4`, fmpKey, ticker),
     fmpGet(`/discounted-cash-flow?symbol=${ticker}`, fmpKey, ticker),
-    fmpGet(`/news/stock?symbols=${ticker}&limit=20`, fmpKey, ticker),
+    fetchNews(ticker, (path) => fmpGet(path, fmpKey, ticker)),
     fmpGet(stockOld, fmpKey, ticker),
     fmpGet(stockNew, fmpKey, ticker),
     fmpGet(indexOld, fmpKey, ticker),
@@ -165,14 +166,15 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
   const priceIndex = mergePriceResults(priceIndexOld, priceIndexNew);
   // Ein einziger ungueltiger Key betrifft alle Aufrufe gleichermassen (selber
   // Key fuer alle) - ein Treffer reicht, um den Lauf als Key-Fehler statt als
-  // Datenluecke einzuordnen. Der News-Endpunkt zaehlt bewusst NICHT mit: eine
-  // Verweigerung dort (HTTP 401/402/403) ergibt news_status "blocked", die
-  // Analyse laeuft weiter (siehe fmpAuthErrorExcludingNews).
+  // Datenluecke einzuordnen. Die News (fetchNews) zaehlen bewusst NICHT mit:
+  // eine Verweigerung dort (HTTP 401/402/403) ergibt news_status "blocked",
+  // die Analyse laeuft weiter.
   const fmpAuthError = fmpAuthErrorExcludingNews({
-    profile, peers, income, balance, cashflow, estimates, dcf, news, priceStock, priceIndex, scores, priceTargetSummary, grades,
+    profile, peers, income, balance, cashflow, estimates, dcf, priceStock, priceIndex, scores, priceTargetSummary, grades,
   });
-  const newsStatus = classifyNewsStatus(news);
-  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news, newsStatus, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
+  // computeScores() erwartet die News in der Form eines FMP-Ergebnisses.
+  const newsForScoring = { ok: true, data: news.items };
+  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news: newsForScoring, newsStatus: news.status, newsSource: news.source, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
@@ -213,15 +215,6 @@ async function runAnalysis(
       // fmpAuthError-Fall oben.
       throw new Error("Keine Profildaten bei FMP gefunden - Ticker existiert vermutlich nicht.");
     }
-
-    // Datenlage dieses Laufs, nur zur Kennzeichnung (chart_data.data_flags),
-    // ohne Einfluss auf Score, Status oder Cache.
-    const dataFlags = buildDataFlags({
-      newsStatus: fmpData.newsStatus,
-      availability: scoreData.dataAvailability,
-      balanceRows: arr(fmpData.balance),
-      incomeRows: arr(fmpData.income),
-    });
 
     const stability = computeStabilityScore(
       fmpData.scores,
@@ -286,6 +279,7 @@ async function runAnalysis(
     const llmCallStart = Date.now();
     const llmResult = await callLLM({ provider, apiKey: llmApiKey, model: llmModel, systemPrompt: SYSTEM_PROMPT, userPrompt });
     const parsed = parseAnalysisResult(llmResult);
+    const recoveryRuns = [parsed.embeddedRecovery];
     await logApiCall({
       functionName: "analyse",
       provider,
@@ -404,6 +398,7 @@ async function runAnalysis(
       const llmCallStart2 = Date.now();
       const llmResult2 = await callLLM({ provider, apiKey: llmApiKey, model: controlModel, systemPrompt: SYSTEM_PROMPT, userPrompt });
       const parsed2 = parseAnalysisResult(llmResult2);
+      recoveryRuns.push(parsed2.embeddedRecovery);
       await logApiCall({
         functionName: "analyse",
         provider,
@@ -525,7 +520,16 @@ async function runAnalysis(
         relativeStrength: scoreData.relativeStrength,
         returnBars: scoreData.returnBars,
         quickCheck,
-        data_flags: dataFlags,
+        // Datenlage dieses Laufs, nur zur Kennzeichnung, ohne Einfluss auf
+        // Score, Status oder Cache.
+        data_flags: buildDataFlags({
+          newsStatus: fmpData.newsStatus,
+          newsSource: fmpData.newsSource,
+          availability: scoreData.dataAvailability,
+          balanceRows: arr(fmpData.balance),
+          incomeRows: arr(fmpData.income),
+          llmRecovered: llmRecoveredFrom(recoveryRuns),
+        }),
         analystConsensus,
         bankRatings,
         // Fuer den Analysten-Memo-Kopfbereich: alles bereits im selben
