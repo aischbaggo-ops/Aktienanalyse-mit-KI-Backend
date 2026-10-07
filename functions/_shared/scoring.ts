@@ -67,6 +67,58 @@ function combineHistProg(histA: number | null, progA: number | null): number | n
   return Math.min(histA, progA);
 }
 
+// ---------- UNTERWASSER-PHASEN / NOTBREMSE (Spec Legrand_Score_Algorithmus.md, Trend) ----------
+const YEAR_MS = 365.25 * 24 * 3600 * 1000;
+
+export interface UnderwaterPhase {
+  start: Date;
+  end: Date;
+  years: number;
+  // true: Phase dauert am letzten Kurstermin noch an.
+  open: boolean;
+}
+
+// rows: aufsteigend nach Datum. Eine Phase beginnt mit dem ersten Schlusskurs
+// unter dem bisherigen Hoch und endet mit dem ersten Schlusskurs auf oder
+// ueber diesem Hoch.
+export function underwaterPhases(rows: { date: string; close: number }[]): UnderwaterPhase[] {
+  const phases: UnderwaterPhase[] = [];
+  if (!rows.length) return phases;
+  let peak = rows[0].close;
+  let start: Date | null = null;
+  for (const r of rows) {
+    if (r.close >= peak) {
+      peak = r.close;
+      if (start) {
+        const end = new Date(r.date);
+        phases.push({ start, end, years: (+end - +start) / YEAR_MS, open: false });
+        start = null;
+      }
+    } else if (!start) {
+      start = new Date(r.date);
+    }
+  }
+  if (start) {
+    const end = new Date(rows[rows.length - 1].date);
+    phases.push({ start, end, years: (+end - +start) / YEAR_MS, open: true });
+  }
+  return phases;
+}
+
+export const NOTBREMSE_MIN_YEARS = 7;
+export const NOTBREMSE_WINDOW_YEARS = 15;
+
+// Notbremse: eine Phase laenger als 7 Jahre, die in den letzten rund 15 Jahren
+// vor asOf lag. "Lag in den letzten 15 Jahren" heisst hier: die Phase reicht
+// in dieses Fenster hinein (Ende oder laufende Phase), nicht erst ihr Beginn -
+// sonst bliebe ein seit 18 Jahren anhaltender Seitwaertssumpf ohne Notbremse.
+// Eine Phase, die vor dem Fenster endete (reine Alt-Durststrecke), loest sie
+// nicht aus.
+export function notbremseTriggered(phases: UnderwaterPhase[], asOf: Date): boolean {
+  const cutoff = new Date(+asOf - NOTBREMSE_WINDOW_YEARS * YEAR_MS);
+  return phases.some((p) => p.years > NOTBREMSE_MIN_YEARS && p.end >= cutoff);
+}
+
 export function computeScores(d: any) {
   const profile = first(d.profile);
   const incomeRaw = arr(d.income).slice().sort((a: any, b: any) => +new Date(a.date) - +new Date(b.date));
@@ -284,17 +336,11 @@ export function computeScores(d: any) {
   })();
   function longestUnderwaterYears(rows: any[]): number | null {
     if (!rows.length) return null;
-    let peak = rows[0].close, underwaterStart: Date | null = null, longest = 0;
-    for (const r of rows) {
-      if (r.close >= peak) {
-        peak = r.close;
-        if (underwaterStart) { longest = Math.max(longest, (+new Date(r.date) - +underwaterStart) / (365.25 * 24 * 3600 * 1000)); underwaterStart = null; }
-      } else if (!underwaterStart) { underwaterStart = new Date(r.date); }
-    }
-    if (underwaterStart) longest = Math.max(longest, (+new Date(rows[rows.length - 1].date) - +underwaterStart) / (365.25 * 24 * 3600 * 1000));
-    return longest;
+    return underwaterPhases(rows).reduce((m, p) => Math.max(m, p.years), 0);
   }
   const underwaterStock = longestUnderwaterYears(stockRows);
+  const notbremse = stockRows.length > 0
+    && notbremseTriggered(underwaterPhases(stockRows), new Date(stockRows[stockRows.length - 1].date));
   const underwaterIndex = longestUnderwaterYears(indexRows);
   const underwaterRatio = underwaterStock !== null && underwaterIndex ? underwaterStock / underwaterIndex : null;
 
@@ -304,7 +350,7 @@ export function computeScores(d: any) {
   { const a = wVola === null ? null : wVola < 0.20 ? 1 : wVola <= 0.35 ? 0.5 : 0;
     trendKriterien.push({ name: "Kontinuitaet (Volatilitaet der Jahresrenditen, zeitgewichtet)", a, wert: wVola }); }
   { let a = underwaterRatio === null ? null : underwaterRatio < 0.8 ? 1 : underwaterRatio <= 1.2 ? 0.5 : 0;
-    if (underwaterStock !== null && underwaterStock > 7) a = 0;
+    if (notbremse) a = 0;
     trendKriterien.push({ name: "Laengste Unterwasser-Phase relativ zum S&P", a, wert: underwaterRatio }); }
   { const diff = wCagrStock !== null && wCagrIndex !== null ? wCagrStock - wCagrIndex : null;
     const a = diff === null ? null : diff > 0.01 ? 1 : diff >= -0.01 ? 0.5 : 0;
