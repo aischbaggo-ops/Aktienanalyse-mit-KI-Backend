@@ -5,6 +5,7 @@
 // UNVERAENDERT - keine neue Bewertungslogik, kein neues Feld.
 
 import { rescueEmbeddedFields } from "./embeddedFields.ts";
+import { recoverSwot } from "./swotFallback.ts";
 
 export const QUAL_WEIGHTS: Record<string, { w: number; optional: boolean }> = {
   "Geschaeftsmodell verstanden": { w: 1, optional: false },
@@ -166,9 +167,20 @@ export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) 
     console.warn(`[parseAnalysisResult] fields recovered from embedded text: ${Object.keys(embeddedRecovery.adopted).join(", ")}`);
   }
 
+  // Fallback: swot als Text statt Objekt (EXR/FAST/TEL im US-Lauf), teils mit
+  // dem Rest der Antwort darin. In ein Objekt umwandeln und ein eingebettetes
+  // fazit/firmenbeschreibung_de nur dann uebernehmen, wenn das Feld fehlt.
+  const swotFallback = recoverSwot(merged?.swot);
+  if (swotFallback.recovered) {
+    console.warn(`[parseAnalysisResult] swot recovered from text${Object.keys(swotFallback.extra).length ? `, plus ${Object.keys(swotFallback.extra).join(", ")}` : ""}`);
+  } else if (swotFallback.error) {
+    console.warn(`[parseAnalysisResult] swot is text but not recoverable: ${swotFallback.error}`);
+  }
+
   const kriterien: any[] | undefined = Array.isArray(merged?.kriterien) ? merged.kriterien : undefined;
-  const fazitRaw: string | null = embeddedRecovery?.cleanText.fazit ?? merged?.fazit ?? null;
-  const firmenRaw: string | null = embeddedRecovery?.cleanText.firmenbeschreibung_de ?? merged?.firmenbeschreibung_de ?? null;
+  const fazitRaw: string | null = embeddedRecovery?.cleanText.fazit ?? merged?.fazit ?? swotFallback.extra.fazit ?? null;
+  const firmenRaw: string | null =
+    embeddedRecovery?.cleanText.firmenbeschreibung_de ?? merged?.firmenbeschreibung_de ?? swotFallback.extra.firmenbeschreibung_de ?? null;
 
   let scoreQualitaet: number | null = null;
   let qualitaetKriterien: any[] = [];
@@ -193,7 +205,10 @@ export function parseAnalysisResult(result: import("./types.ts").LlmToolResult) 
     tokensInput: result.tokensInput, tokensOutput: result.tokensOutput, costUsd: result.costUsd,
     warnings: merged?.warnings || [],
     fazit: fazitRaw || (parseError ? `Fazit nicht verfuegbar (Parse-Fehler: ${parseError})` : null),
-    swot: merged?.swot ?? null,
+    // Nicht lesbarer swot-Text wird zu null statt als String gespeichert
+    // (App und PDF erwarten ein Objekt).
+    swot: swotFallback.swot,
+    swotRecovered: swotFallback.recovered,
     noGoHart: merged?.no_go_hart === true,
     firmenbeschreibungDe: firmenRaw,
   };

@@ -587,7 +587,7 @@ async function runAnalysis(
           availability: scoreData.dataAvailability,
           balanceRows: arr(fmpData.balance),
           incomeRows: arr(fmpData.income),
-          llmRecovered: llmRecoveredFrom(recoveryRuns),
+          llmRecovered: llmRecoveredFrom(recoveryRuns) || parsed.swotRecovered,
         }),
         analystConsensus,
         bankRatings,
