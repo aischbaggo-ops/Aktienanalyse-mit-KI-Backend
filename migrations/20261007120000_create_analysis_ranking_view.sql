@@ -5,7 +5,12 @@
 --
 -- Zweck: Sortieren, Filtern und CSV-Export der Analysen, ohne dass das
 -- Frontend JSON-Pfade aus chart_data/bewertung/criteria kennen muss. Enthaelt
--- bewusst keine Fehlertexte, Kosten oder Rohantworten.
+-- bewusst keine Fehlertexte, Kosten oder Rohantworten und keine ganzen
+-- JSON-Spalten - nur einzelne, daraus gelesene Werte.
+--
+-- 09.10.: logo_url und price ergaenzt (fuer die Analyse-Tabellen der App).
+-- market_cap und price stammen von FMP: nur in der App anzeigen, nicht in
+-- PDF- oder CSV-Export (FMP-Lizenzfrage offen).
 --
 -- security_invoker = true: die Sicht gilt mit den Rechten des Aufrufers, es
 -- greift also die RLS von stock_analyses (select fuer authenticated) und
@@ -35,6 +40,8 @@ select
   a.sector,
   a.chart_data->'profileMeta'->>'industry'                  as industry,
   a.currency,
+  a.current_price                                           as price,
+  a.chart_data->'profileMeta'->>'image'                     as logo_url,
   a.chart_data->'profileMeta'->>'exchange'                  as exchange,
   (a.chart_data->'profileMeta'->>'marketCap')::numeric      as market_cap,
   a.chart_data->'quickCheck'->'marktkap_klasse'->>'klasse'  as cap_class,
@@ -121,5 +128,5 @@ select
                                                             as indices
 from stock_analyses a;
 
-revoke all on analysis_ranking from anon, authenticated;
+revoke all on analysis_ranking from public, anon, authenticated;
 grant select on analysis_ranking to authenticated;
