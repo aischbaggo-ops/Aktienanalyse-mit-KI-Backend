@@ -240,6 +240,37 @@ const EMPTY = (reason: string): Trend3Result => ({
 
 export const NICHT_BEWERTBAR_KURZE_HISTORIE = "Kurshistorie unter 3 Jahren";
 
+// ---------------------------------------------------------------------------
+// Gemeinsame Behandlung "kein gueltiges Zeitfenster" fuer recalc-trend UND
+// analyse. Beide muessen dieselben Spalten gleich setzen, sonst zeigt die
+// Tabelle fuer dieselbe Ursache einmal "nicht bewertbar" und einmal "Fehler".
+//
+// Die Tabelle liest den Text NICHT aus error_message_public, sondern ueber
+// attachErrorInfo() aus last_run_error_code und last_run_error_public
+// (frontend/src/lib/analysisData.ts). assessmentText() zeigt nur dann
+// "nicht bewertbar", wenn der Code 'score_incomplete' ist, und setzt den
+// Klammertext, wenn die Meldung "zu kurze Kurshistorie" enthaelt. Beides
+// muss also genau so drinstehen.
+// ---------------------------------------------------------------------------
+
+export const SCORE_INCOMPLETE_CODE = "score_incomplete";
+
+export const NICHT_BEWERTBAR_PUBLIC =
+  "Gesamtscore nicht berechenbar (fehlend: Trend). Ursache: zu kurze Kurshistorie " +
+  `(weniger als ${TREND3_CONFIG.minMonthsPerWindow} Monatskurse in jedem Zeitfenster).`;
+
+export function nichtBewertbarFelder(grund: string | null) {
+  return {
+    status: "error",
+    last_run_status: "error",
+    last_run_error_code: SCORE_INCOMPLETE_CODE,
+    last_run_error_public: NICHT_BEWERTBAR_PUBLIC,
+    error_message_public: NICHT_BEWERTBAR_PUBLIC,
+    error_message: `Trend nach Methodik ${METHODIK_VERSION_TREND3} nicht berechenbar: ` +
+      `${grund ?? "kein gueltiges Zeitfenster"}.`,
+  };
+}
+
 export function computeTrend3(
   stockRaw: PriceRow[], indexRaw: PriceRow[], cfg: Trend3Config = TREND3_CONFIG,
 ): Trend3Result {

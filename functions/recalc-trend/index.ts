@@ -9,7 +9,7 @@ import { priceHistoryPaths, mergePriceResults } from "../_shared/priceHistory.ts
 import { BENCHMARK_SYMBOL } from "../_shared/dataFlags.ts";
 import {
   computeTrend3, computeTotalWithTrend3, METHODIK_VERSION_TREND3,
-  NICHT_BEWERTBAR_KURZE_HISTORIE, TREND3_CONFIG, type PriceRow,
+  nichtBewertbarFelder, TREND3_CONFIG, type PriceRow,
 } from "../_shared/trend3.ts";
 
 // ---------------------------------------------------------------------------
@@ -124,6 +124,9 @@ interface AnalysisRow {
   chart_data: Record<string, unknown> | null;
   error_message: string | null;
   error_message_public: string | null;
+  last_run_status: string | null;
+  last_run_error_code: string | null;
+  last_run_error_public: string | null;
 }
 
 Deno.serve(async (req) => {
@@ -174,18 +177,52 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Ohne Status-Filter lesen und erst danach aussortieren: so taucht jede
+    // Zeile mit status <> 'done' (FDXF, HONA, SPCX) sichtbar als
+    // "uebersprungen" mit Grund auf, statt stillschweigend zu fehlen.
     let query = supabase
       .from("stock_analyses")
       .select("ticker, status, updated_at, score_fundamental, score_qualitaet, score_krise, " +
-        "score_trend, score_total, criteria, chart_data, error_message, error_message_public")
-      .eq("status", "done")
+        "score_trend, score_total, criteria, chart_data, error_message, error_message_public, " +
+        "last_run_status, last_run_error_code, last_run_error_public")
       .order("ticker");
     if (wanted) query = query.in("ticker", wanted);
     else query = query.range(offset, offset + limit - 1);
     const { data: rowsData, error: rowsError } = await query;
     if (rowsError) throw new Error(`Zeilen lesen fehlgeschlagen: ${rowsError.message}`);
-    const rows = (rowsData ?? []) as unknown as AnalysisRow[];
-    if (!rows.length) return json({ dry_run: dryRun, geprueft: 0, ergebnisse: [], hinweis: "Keine passenden Zeilen." });
+    const alleRows = (rowsData ?? []) as unknown as AnalysisRow[];
+
+    const results: Record<string, unknown>[] = [];
+    let geschrieben = 0, uebersprungen = 0, ohneTrend = 0;
+
+    const rows: AnalysisRow[] = [];
+    for (const row of alleRows) {
+      if (row.status !== "done") {
+        results.push({
+          ticker: row.ticker,
+          uebersprungen: `status ist '${row.status}', nicht 'done'`,
+          status_alt: row.status,
+          methodik_version: (row.chart_data?.data_flags as Record<string, unknown> | undefined)
+            ?.methodik_version ?? null,
+          last_run_error_code: row.last_run_error_code,
+        });
+        uebersprungen++;
+        continue;
+      }
+      rows.push(row);
+    }
+    if (wanted) {
+      for (const t of wanted.filter((t) => !alleRows.some((r) => r.ticker === t))) {
+        results.push({ ticker: t, uebersprungen: "keine Zeile in stock_analyses" });
+        uebersprungen++;
+      }
+    }
+    if (!rows.length) {
+      return json({
+        dry_run: dryRun, geprueft: 0, geschrieben: 0, uebersprungen,
+        ergebnisse: results, hinweis: "Keine Zeile mit status 'done' zu rechnen.",
+      });
+    }
 
     // Der Index ist fuer alle Ticker derselbe: einmal laden statt 514-mal.
     const indexPrices = await fetchPrices(BENCHMARK_SYMBOL, fmpKey, BENCHMARK_SYMBOL);
@@ -193,9 +230,6 @@ Deno.serve(async (req) => {
     if (indexPrices.rows.length < 2) {
       return json({ error: "Keine Indexkurse von FMP erhalten, Neuberechnung nicht moeglich." }, 502);
     }
-
-    const results: Record<string, unknown>[] = [];
-    let geschrieben = 0, uebersprungen = 0, ohneTrend = 0;
 
     for (let i = 0; i < rows.length; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
@@ -271,15 +305,19 @@ Deno.serve(async (req) => {
         };
 
         // Statusregel: ohne Gesamtscore ist die Zeile nicht bewertbar. Die
-        // Teilscores F, Q und Krise bleiben in der Zeile stehen.
+        // Teilscores F, Q und Krise bleiben stehen. Die Felder kommen aus
+        // trend3.ts, damit analyse genau dieselben Spalten gleich setzt.
         const istBewertbar = totalNeu !== null;
-        const statusNeu = istBewertbar ? "done" : "error";
-        const errPublic = istBewertbar
-          ? row.error_message_public
-          : `Nicht bewertbar (${NICHT_BEWERTBAR_KURZE_HISTORIE}).`;
-        const errInternal = istBewertbar
-          ? row.error_message
-          : `Trend nicht berechenbar: ${t3.nichtBewertbar ?? "kein gueltiges Zeitfenster"}.`;
+        const felder = istBewertbar
+          ? {
+            status: "done",
+            last_run_status: row.last_run_status,
+            last_run_error_code: row.last_run_error_code,
+            last_run_error_public: row.last_run_error_public,
+            error_message: row.error_message,
+            error_message_public: row.error_message_public,
+          }
+          : nichtBewertbarFelder(t3.nichtBewertbar);
 
         const { data: applied, error: applyError } = await supabase.rpc("apply_trend3", {
           p_ticker: row.ticker,
@@ -288,9 +326,12 @@ Deno.serve(async (req) => {
           p_score_total: totalNeu,
           p_criteria: criteriaNeu,
           p_chart_data: chartNeu,
-          p_status: statusNeu,
-          p_error_message: errInternal,
-          p_error_message_public: errPublic,
+          p_status: felder.status,
+          p_error_message: felder.error_message,
+          p_error_message_public: felder.error_message_public,
+          p_last_run_status: felder.last_run_status,
+          p_last_run_error_code: felder.last_run_error_code,
+          p_last_run_error_public: felder.last_run_error_public,
         });
         if (applyError) {
           results.push({ ...eintrag, geschrieben: false, fehler: applyError.message });
@@ -298,7 +339,7 @@ Deno.serve(async (req) => {
           return;
         }
         geschrieben++;
-        results.push({ ...eintrag, geschrieben: true, status_neu: statusNeu, rpc: applied });
+        results.push({ ...eintrag, geschrieben: true, status_neu: felder.status, rpc: applied });
       }));
     }
 
