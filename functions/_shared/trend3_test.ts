@@ -1,7 +1,7 @@
 import {
   addMonths, cagrInWindow, annualReturns, populationStdDev, longestUnderwaterYears,
   computeTrend3, computeTotalWithTrend3, TREND3_CONFIG, NICHT_BEWERTBAR_KURZE_HISTORIE,
-  type PriceRow,
+  nichtBewertbarFelder, type PriceRow,
 } from "./trend3.ts";
 
 function assert(cond: unknown, msg: string) {
@@ -220,4 +220,23 @@ Deno.test("Kriterien behalten die Form aus der Datenbank", () => {
     assert(typeof k.begruendung === "string" && k.begruendung.length > 0, "begruendung");
     assert(Object.keys(k).sort().join(",") === "ampel,begruendung,dimension,name", "keine Zusatzfelder");
   }
+});
+
+Deno.test("nichtBewertbarFelder passt zu dem, was die Tabelle liest", () => {
+  const f = nichtBewertbarFelder("Kurshistorie unter 3 Jahren");
+  // assessmentText() im Frontend verlangt genau diesen Code, sonst "Fehler".
+  assert(f.last_run_error_code === "score_incomplete", "Code score_incomplete");
+  assert(f.status === "error" && f.last_run_status === "error", "beide Status error");
+  // Der Klammertext der Tabelle haengt an diesem Teilstring.
+  assert(f.last_run_error_public.includes("zu kurze Kurshistorie"), "Teilstring fuer den Klammertext");
+  // Zusatz fuer den Tooltip.
+  assert(f.last_run_error_public.includes("36 Monatskurse"), "Zusatz 36 Monatskurse");
+  assert(f.error_message_public === f.last_run_error_public, "oeffentliche Texte gleich");
+  assert(f.error_message.includes("Methodik 3"), "interne Meldung nennt die Methodik");
+});
+
+Deno.test("nichtBewertbarFelder setzt genau die erwarteten Spalten", () => {
+  const keys = Object.keys(nichtBewertbarFelder(null)).sort().join(",");
+  assert(keys === "error_message,error_message_public,last_run_error_code," +
+    "last_run_error_public,last_run_status,status", `Spalten: ${keys}`);
 });
