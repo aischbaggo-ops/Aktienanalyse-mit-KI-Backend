@@ -214,6 +214,7 @@ export interface Trend3Result {
   ampeln: { cagr: number | null; vola: number | null; uw: number | null; diff: number | null };
   kennzahlen: {
     cagr: number | null;
+    cagrIndex: number | null;
     vola: number | null;
     uwRatio: number | null;
     diff: number | null;
@@ -233,7 +234,10 @@ export interface Trend3Result {
 const EMPTY = (reason: string): Trend3Result => ({
   score: null, kriterien: [], nFenster: 0, notbremse: false,
   ampeln: { cagr: null, vola: null, uw: null, diff: null },
-  kennzahlen: { cagr: null, vola: null, uwRatio: null, diff: null, uwStockYears: null, uwIndexYears: null },
+  kennzahlen: {
+    cagr: null, cagrIndex: null, vola: null, uwRatio: null, diff: null,
+    uwStockYears: null, uwIndexYears: null,
+  },
   fenster: [], gemeinsamerStart: null, asOf: null,
   methodikVersion: METHODIK_VERSION_TREND3, nichtBewertbar: reason,
 });
@@ -294,6 +298,7 @@ export function computeTrend3(
 
   const fenster: Trend3Window[] = [];
   const cagrPairs: { value: number | null; weight: number }[] = [];
+  const cagrIndexPairs: { value: number | null; weight: number }[] = [];
   const diffPairs: { value: number | null; weight: number }[] = [];
   const volaPairs: { value: number | null; weight: number }[] = [];
 
@@ -307,6 +312,7 @@ export function computeTrend3(
     const rets = annualReturns(stock, asOf, von, bis);
     const vola = populationStdDev(rets);
     cagrPairs.push({ value: cagrStock, weight });
+    cagrIndexPairs.push({ value: cagrIndex, weight });
     diffPairs.push({
       value: cagrStock !== null && cagrIndex !== null ? cagrStock - cagrIndex : null,
       weight,
@@ -321,6 +327,7 @@ export function computeTrend3(
   if (fenster.length === 0) return { ...EMPTY(NICHT_BEWERTBAR_KURZE_HISTORIE), asOf, gemeinsamerStart };
 
   const cagr = weightedMean(cagrPairs);
+  const cagrIndex = weightedMean(cagrIndexPairs);
   const diff = weightedMean(diffPairs);
   const vola = weightedMean(volaPairs);
 
@@ -395,7 +402,7 @@ export function computeTrend3(
 
   return {
     score, kriterien, ampeln,
-    kennzahlen: { cagr, vola, uwRatio, diff, uwStockYears, uwIndexYears },
+    kennzahlen: { cagr, cagrIndex, vola, uwRatio, diff, uwStockYears, uwIndexYears },
     fenster, nFenster: fenster.length, notbremse,
     gemeinsamerStart, asOf,
     methodikVersion: METHODIK_VERSION_TREND3,
@@ -410,4 +417,21 @@ export function computeTotalWithTrend3(
 ): number | null {
   if (f === null || q === null || k === null || t === null) return null;
   return Math.round(0.35 * f + 0.25 * q + 0.20 * k + 0.20 * t);
+}
+
+// chart_data->'trend' fuer die Datenbank. Bewusst EINE Stelle, damit eine
+// Zeile gleich aussieht, egal ob analyse oder recalc-trend sie geschrieben
+// hat. Das Frontend liest diesen Block nicht, er dient der Nachvollziehbarkeit.
+export function trend3ChartBlock(r: Trend3Result) {
+  return {
+    methodik: r.methodikVersion,
+    score: r.score,
+    kennzahlen: r.kennzahlen,
+    fenster: r.fenster,
+    notbremse: r.notbremse,
+    gemeinsamerStart: r.gemeinsamerStart,
+    asOf: r.asOf,
+    nichtBewertbar: r.nichtBewertbar,
+    schwellen: TREND3_CONFIG,
+  };
 }
