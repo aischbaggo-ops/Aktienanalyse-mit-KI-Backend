@@ -9,7 +9,7 @@ import { priceHistoryPaths, mergePriceResults } from "../_shared/priceHistory.ts
 import { BENCHMARK_SYMBOL } from "../_shared/dataFlags.ts";
 import {
   computeTrend3, computeTotalWithTrend3, METHODIK_VERSION_TREND3,
-  nichtBewertbarFelder, TREND3_CONFIG, type PriceRow,
+  nichtBewertbarFelder, trend3ChartBlock, TREND3_CONFIG, type PriceRow,
 } from "../_shared/trend3.ts";
 
 // ---------------------------------------------------------------------------
@@ -282,16 +282,7 @@ Deno.serve(async (req) => {
         const flagsAlt = (chartAlt.data_flags ?? {}) as Record<string, unknown>;
         const chartNeu: Record<string, unknown> = {
           ...chartAlt,
-          trend: {
-            methodik: METHODIK_VERSION_TREND3,
-            score: t3.score,
-            kennzahlen: t3.kennzahlen,
-            fenster: t3.fenster,
-            notbremse: t3.notbremse,
-            gemeinsamerStart: t3.gemeinsamerStart,
-            asOf: t3.asOf,
-            schwellen: TREND3_CONFIG,
-          },
+          trend: trend3ChartBlock(t3),
           data_flags: {
             ...flagsAlt,
             methodik_version: METHODIK_VERSION_TREND3,
