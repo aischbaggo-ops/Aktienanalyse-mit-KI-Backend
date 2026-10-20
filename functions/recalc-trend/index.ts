@@ -7,6 +7,7 @@ import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { priceHistoryPaths, mergePriceResults } from "../_shared/priceHistory.ts";
 import { BENCHMARK_SYMBOL } from "../_shared/dataFlags.ts";
+import { resolveFmpSymbol } from "../_shared/tickerCheck.ts";
 import {
   computeTrend3, computeTotalWithTrend3, METHODIK_VERSION_TREND3,
   nichtBewertbarFelder, trend3ChartBlock, TREND3_CONFIG, type PriceRow,
@@ -234,7 +235,17 @@ Deno.serve(async (req) => {
     for (let i = 0; i < rows.length; i += CONCURRENCY) {
       const batch = rows.slice(i, i + CONCURRENCY);
       await Promise.all(batch.map(async (row) => {
-        const stock = await fetchPrices(row.ticker, fmpKey, row.ticker);
+        // FMP schreibt Ticker mit Punkt anders: BRK.B heisst dort BRK-B.
+        // Ohne diese Aufloesung liefert die Kursabfrage nichts und der Ticker
+        // wird stillschweigend uebersprungen (BF.B und BRK.B am 20.10.2026).
+        // analyse macht das seit jeher ueber dieselbe Funktion. Fuer Ticker
+        // ohne Punkt oder Bindestrich kostet das keinen zusaetzlichen Aufruf,
+        // resolveFmpSymbol kehrt dann sofort zurueck.
+        const sym = await resolveFmpSymbol(
+          row.ticker,
+          (s) => fmpGet(`/profile?symbol=${encodeURIComponent(s)}`, fmpKey, row.ticker),
+        );
+        const stock = await fetchPrices(sym, fmpKey, row.ticker);
         if (stock.authError) {
           results.push({ ticker: row.ticker, uebersprungen: "FMP-Schluessel ungueltig" });
           uebersprungen++;
@@ -263,6 +274,7 @@ Deno.serve(async (req) => {
           kennzahlen: t3.kennzahlen,
           nicht_bewertbar: t3.nichtBewertbar,
           kurse: stock.rows.length,
+          ...(sym !== row.ticker ? { fmp_symbol: sym } : {}),
         };
 
         if (dryRun) {
