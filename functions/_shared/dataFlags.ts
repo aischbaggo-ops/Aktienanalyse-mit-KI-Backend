@@ -77,7 +77,7 @@ export function reportedCurrencyFrom(balanceRows: any[], incomeRows: any[]): str
 // Erhoehen, sobald eine Aenderung Scores aelterer Zeilen nicht mehr
 // vergleichbar macht. Version 2: Kurshistorie in zwei Fenstern ab 2000 (PR #35,
 // Dotcom-Phase jetzt enthalten) aendert Krise- und Trend-Score.
-export const METHODIK_VERSION = 2;
+export const METHODIK_VERSION = 3;
 
 export interface DataFlags {
   news_status: NewsStatus;

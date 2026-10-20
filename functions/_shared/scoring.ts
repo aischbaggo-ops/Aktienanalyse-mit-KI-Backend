@@ -1,3 +1,4 @@
+import { computeTrend3 } from "./trend3.ts";
 import { buildNewsSummary } from "./dataFlags.ts";
 
 export function ok(x: any) { return x && x.ok && x.data; }
@@ -314,7 +315,18 @@ export function computeScores(d: any) {
     ? krisenKomponente * 100
     : (0.8 * krisenKomponente + 0.2 * betaAmpel) * 100;
 
-  // ---------- TREND ----------
+  // ---------- TREND (Methodik 3) ----------
+  // Die Rechenlogik steht in trend3.ts: jede Kennzahl in drei Zeitfenstern,
+  // gewichtet mit 2/1/0,5, echter geometrischer CAGR, Aktie und Index je
+  // Fenster ueber denselben Zeitraum (Spec Abschnitt 6, Variante A2).
+  // recalc-trend nutzt dieselbe Funktion - es gibt bewusst nur eine Fassung.
+  const trend3 = computeTrend3(stockRows, indexRows);
+  const scoreTrend = trend3.score;
+
+  // Jahresrenditen auf KALENDERJAHREN. Sie tragen den Trend-Score nicht mehr
+  // (Methodik 3 verankert ihre Jahresrenditen am Stichtag), sondern nur noch
+  // die Balken in der Analyseansicht. Entscheidung vom 10.10.2026: fuer die
+  // Anzeige sind Kalenderjahre verstaendlicher als "Okt bis Okt".
   function yearlyReturns(rows: any[]) {
     const byYear = new Map<string, number>();
     for (const r of rows) byYear.set(r.date.slice(0, 4), r.close);
@@ -326,49 +338,7 @@ export function computeScores(d: any) {
     }
     return out;
   }
-  function recencyFactor(year: number) { const age = new Date().getFullYear() - year; return age <= 10 ? 2 : age <= 20 ? 1 : 0.5; }
-  function weightedAvg<T>(items: T[], valueFn: (i: T) => number, weightFn: (i: T) => number): number | null {
-    let num = 0, den = 0;
-    for (const it of items) { const w = weightFn(it); num += valueFn(it) * w; den += w; }
-    return den > 0 ? num / den : null;
-  }
   const stockReturns = yearlyReturns(stockRows);
-  const indexReturns = yearlyReturns(indexRows);
-  const wCagrStock = weightedAvg(stockReturns, (r) => r.ret, (r) => recencyFactor(r.year));
-  const wCagrIndex = weightedAvg(indexReturns, (r) => r.ret, (r) => recencyFactor(r.year));
-  const wVola = (() => {
-    if (!stockReturns.length) return null;
-    const mean = weightedAvg(stockReturns, (r) => r.ret, (r) => recencyFactor(r.year))!;
-    const variance = weightedAvg(stockReturns, (r) => (r.ret - mean) ** 2, (r) => recencyFactor(r.year));
-    return variance !== null ? Math.sqrt(variance) : null;
-  })();
-  function longestUnderwaterYears(rows: any[]): number | null {
-    if (!rows.length) return null;
-    return underwaterPhases(rows).reduce((m, p) => Math.max(m, p.years), 0);
-  }
-  const underwaterStock = longestUnderwaterYears(stockRows);
-  const notbremse = stockRows.length > 0
-    && notbremseTriggered(underwaterPhases(stockRows), new Date(stockRows[stockRows.length - 1].date));
-  const underwaterIndex = longestUnderwaterYears(indexRows);
-  const underwaterRatio = underwaterStock !== null && underwaterIndex ? underwaterStock / underwaterIndex : null;
-
-  const trendKriterien: any[] = [];
-  { const a = wCagrStock === null ? null : wCagrStock > 0.08 ? 1 : wCagrStock >= 0 ? 0.5 : 0;
-    trendKriterien.push({ name: "Aufwaertstrend ueber ca. 20 Jahre (zeitgewichtete CAGR)", a, wert: wCagrStock }); }
-  { const a = wVola === null ? null : wVola < 0.20 ? 1 : wVola <= 0.35 ? 0.5 : 0;
-    trendKriterien.push({ name: "Kontinuitaet (Volatilitaet der Jahresrenditen, zeitgewichtet)", a, wert: wVola }); }
-  { let a = underwaterRatio === null ? null : underwaterRatio < 0.8 ? 1 : underwaterRatio <= 1.2 ? 0.5 : 0;
-    if (notbremse) a = 0;
-    trendKriterien.push({ name: "Laengste Unterwasser-Phase relativ zum S&P", a, wert: underwaterRatio }); }
-  { const diff = wCagrStock !== null && wCagrIndex !== null ? wCagrStock - wCagrIndex : null;
-    const a = diff === null ? null : diff > 0.01 ? 1 : diff >= -0.01 ? 0.5 : 0;
-    trendKriterien.push({ name: "Performance vs. S&P (zeitgewichtete CAGR-Differenz)", a, wert: diff }); }
-  // Ohne mindestens eine Jahresrendite der Aktie (keine oder zu kurze
-  // Kursreihe) sind CAGR, Volatilitaet und S&P-Vergleich nicht berechenbar;
-  // die Unterwasser-Kennzahl allein soll dann keinen Trend-Score tragen.
-  const scoreTrend = stockReturns.length === 0
-    ? null
-    : subScore(trendKriterien.map((k) => ({ a: k.a, w: 1 })));
 
   const warningsNumerisch: string[] = [];
   if (dynVerschuldungKO) warningsNumerisch.push("Dynamischer Verschuldungsgrad zweistellig (Netto-Schulden/FCF >= 10 Jahre) - Ausschluss-Hinweis.");
@@ -456,7 +426,20 @@ export function computeScores(d: any) {
     newsSummary,
     fundamental: { score: scoreFundamental, kriterien: kriterienFundamental },
     krise: { score: scoreKrise, komponente: krisenKomponente, beta, betaAmpel, crisisDetail },
-    trend: { score: scoreTrend, kriterien: trendKriterien, wCagrStock, wCagrIndex, wVola, underwaterStock, underwaterIndex },
+    trend: {
+      score: scoreTrend,
+      // Bereits in der Form, die criteria in der Datenbank hat
+      // ({dimension, name, ampel, begruendung}) - analyse reicht sie durch.
+      kriterien: trend3.kriterien,
+      ergebnis: trend3,
+      // Aliasse fuer bestehende Verwendungen (quickCheck "aufwaertstrend",
+      // Anomalie-Logging, chart_data).
+      wCagrStock: trend3.kennzahlen.cagr,
+      wCagrIndex: trend3.kennzahlen.cagrIndex,
+      wVola: trend3.kennzahlen.vola,
+      underwaterStock: trend3.kennzahlen.uwStockYears,
+      underwaterIndex: trend3.kennzahlen.uwIndexYears,
+    },
     warningsNumerisch,
     // Bereits berechnete Ampel-Werte, zusaetzlich nach aussen gereicht fuer
     // computeStabilityScore() (siehe unten) - keine Logikaenderung, nur Export.

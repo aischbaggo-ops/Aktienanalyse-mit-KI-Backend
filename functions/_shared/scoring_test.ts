@@ -1,6 +1,7 @@
 // Aufruf (aus dem Repo-Root): deno test functions/_shared/scoring_test.ts
 // Rein lokal, ohne Netz und ohne DB. Synthetische Kursreihen, keine FMP-Daten.
 import { computeScores, notbremseTriggered, underwaterPhases } from "./scoring.ts";
+import { trend3ChartBlock, NICHT_BEWERTBAR_KURZE_HISTORIE } from "./trend3.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(`Assertion failed: ${msg}`);
@@ -48,10 +49,13 @@ function fmpInput(stock: { date: string; close: number }[], index: { date: strin
   };
 }
 
+// Seit Methodik 3 tragen die Trend-Kriterien direkt die Ampel als Text
+// (dieselbe Form wie in der Datenbank), nicht mehr den Zahlenwert a.
 function unterwasserAmpel(stock: { date: string; close: number }[], index: { date: string; close: number }[]) {
   const trend = computeScores(fmpInput(stock, index)).trend;
-  const k = trend.kriterien.find((x: any) => x.name.startsWith("Laengste Unterwasser-Phase"));
-  return k.a as number | null;
+  const k = trend.kriterien.find((x) => x.name.startsWith("Laengste Unterwasser-Phase"));
+  if (!k) return null;
+  return k.ampel === "gruen" ? 1 : k.ampel === "gelb" ? 0.5 : k.ampel === "rot" ? 0 : null;
 }
 
 Deno.test("underwaterPhases: Phase beginnt unter dem Hoch, endet beim Wiedererreichen", () => {
@@ -196,4 +200,39 @@ Deno.test("Krise: nur Dotcom fehlt -> dieses Fenster 0,5, Score bleibt berechnet
   assert(s.krise.crisisDetail.filter((c: any) => c.ddStock !== null).length === 4, "uebrige Fenster mit Daten");
   assert(typeof s.krise.score === "number", `Krise berechnet, war ${s.krise.score}`);
   assert(typeof s.trend.score === "number", `Trend berechnet, war ${s.trend.score}`);
+});
+
+// --- Methodik 3: analyse und recalc-trend muessen dasselbe tun -------------
+
+Deno.test("computeScores nutzt Methodik 3 und liefert den Trend-Block mit", () => {
+  const s = computeScores(fmpInput(monthlyFrom(2000), monthlyFrom(2000)));
+  assert(s.trend.ergebnis.methodikVersion === 3, "Methodik 3");
+  assert(s.trend.kriterien.length === 4, "vier Trend-Kriterien");
+  // Dieselbe Form wie in der Datenbank: analyse reicht sie unveraendert durch.
+  for (const k of s.trend.kriterien) {
+    assert(Object.keys(k).sort().join(",") === "ampel,begruendung,dimension,name",
+      `Form der Kriterien: ${Object.keys(k).join(",")}`);
+  }
+  assert(s.trend.wCagrStock === s.trend.ergebnis.kennzahlen.cagr, "Alias wCagrStock");
+  assert(s.trend.wVola === s.trend.ergebnis.kennzahlen.vola, "Alias wVola");
+});
+
+Deno.test("Kurshistorie unter 3 Jahren: Trend null, Grund benannt", () => {
+  // 30 Monate: kein Fenster erreicht die 36 Monatskurse.
+  const kurz = monthlyFrom(2024).slice(0, 30);
+  const s = computeScores(fmpInput(kurz, monthlyFrom(2000)));
+  assert(s.trend.score === null, `Trend null, war ${s.trend.score}`);
+  assert(s.trend.ergebnis.nichtBewertbar === NICHT_BEWERTBAR_KURZE_HISTORIE,
+    `Grund benannt, war ${s.trend.ergebnis.nichtBewertbar}`);
+  // Genau daran haengt der Abbruch in analyse vor dem Claude-Aufruf.
+  assert(s.trend.ergebnis.nFenster === 0, "kein gueltiges Fenster");
+});
+
+Deno.test("trend3ChartBlock ist fuer beide Wege derselbe Block", () => {
+  const s = computeScores(fmpInput(monthlyFrom(2000), monthlyFrom(2000)));
+  const block = trend3ChartBlock(s.trend.ergebnis);
+  assert(block.methodik === 3, "Methodik 3 im Block");
+  assert(block.schwellen.volaGreen === 0.25, "Schwellen mitgeschrieben");
+  assert(block.kennzahlen === s.trend.ergebnis.kennzahlen, "Kennzahlen durchgereicht");
+  assert(Array.isArray(block.fenster) && block.fenster.length > 0, "Fenster mitgeschrieben");
 });

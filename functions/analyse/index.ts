@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsFor } from "../_shared/cors.ts";
-import { computeScores, computeStabilityScore, computePrognose, computeValuation, computeAnalystConsensus, computeBankRatings, ampelLabel, arr, first } from "../_shared/scoring.ts";
+import { computeScores, computeStabilityScore, computePrognose, computeValuation, computeAnalystConsensus, computeBankRatings, arr, first } from "../_shared/scoring.ts";
 import { buildUserPrompt, callLLM, parseAnalysisResult, SYSTEM_PROMPT, type LlmProvider } from "../_shared/llm/index.ts";
 import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys, loadActiveLlmKey } from "../_shared/userKeys.ts";
@@ -10,6 +10,7 @@ import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
 import { mergePriceResults, priceHistoryPaths } from "../_shared/priceHistory.ts";
 import { BENCHMARK_SYMBOL, buildDataFlags, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
+import { trend3ChartBlock, SCORE_INCOMPLETE_CODE, NICHT_BEWERTBAR_PUBLIC } from "../_shared/trend3.ts";
 import { fetchNews } from "../_shared/news.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
@@ -324,6 +325,15 @@ async function runAnalysis(
 
     // Fehlt Fundamental, Krise oder Trend schon jetzt, gibt es ohnehin keinen
     // Gesamtscore: Claude-Aufruf sparen und den Lauf hier beenden.
+    // Trend nicht bewertbar, weil kein Zeitfenster genug Kurse hat: eigener
+    // Abbruch mit DEMSELBEN Text, den recalc-trend schreibt. Sonst haengt der
+    // Tooltip davon ab, welcher Weg die Zeile zuletzt angefasst hat.
+    if (
+      scoreData.trend.score === null && scoreData.trend.ergebnis.nichtBewertbar !== null &&
+      scoreData.fundamental.score !== null && scoreData.krise.score !== null
+    ) {
+      throw new AnalysisAbort(SCORE_INCOMPLETE_CODE, NICHT_BEWERTBAR_PUBLIC);
+    }
     const incomplete = preLlmAbort({
       scores: { fundamental: scoreData.fundamental.score, krise: scoreData.krise.score, trend: scoreData.trend.score },
       fundamentalResults: [fmpData.income, fmpData.balance, fmpData.cashflow],
@@ -370,12 +380,10 @@ async function runAnalysis(
     let allCriteria = [
       ...scoreData.fundamental.kriterien.map((k: any) => ({ dimension: "Fundamental", ...k })),
       ...parsed.qualitaetKriterien,
-      ...scoreData.trend.kriterien.map((k: any) => ({
-        dimension: "Trend", name: k.name, ampel: ampelLabel(k.a),
-        begruendung: k.a === null
-          ? "Kennzahl nicht berechenbar (fehlende Datengrundlage)."
-          : "Kennzahl: " + (k.wert?.toFixed ? k.wert.toFixed(3) : k.wert ?? "n/a"),
-      })),
+      // Methodik 3: trend3.ts liefert die Trend-Kriterien bereits in der
+      // Form {dimension, name, ampel, begruendung} mit ausformulierter
+      // Begruendung (Kennzahl, Schwelle, Fenster). Kein Umbau noetig.
+      ...scoreData.trend.kriterien,
     ];
     if (scoreQualitaet === null && !parsed.parseError) {
       console.warn(`[analyse] LLM call succeeded but scoreQualitaet is null for ${ticker} — kriterien may be missing from tool_use input`);
@@ -570,7 +578,7 @@ async function runAnalysis(
       prognose: prognose,
       chart_data: {
         krise: scoreData.krise.crisisDetail,
-        trend: { wCagrStock: scoreData.trend.wCagrStock, wCagrIndex: scoreData.trend.wCagrIndex, wVola: scoreData.trend.wVola },
+        trend: trend3ChartBlock(scoreData.trend.ergebnis),
         stabilitaet: stability.detail,
         swot,
         no_go_hart: noGoHart,

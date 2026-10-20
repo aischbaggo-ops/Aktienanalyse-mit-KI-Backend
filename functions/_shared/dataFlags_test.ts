@@ -104,15 +104,15 @@ Deno.test("news_status: JSON-Fehlerbody ist blocked, 429 und 5xx bleiben error",
   assert(classifyNewsStatus({ ok: false, data: { message: "x" }, status: 503 }) === "error", "503 zuerst");
 });
 
-Deno.test("methodik_version: jede neue Zeile traegt Version 2", () => {
+Deno.test("methodik_version: jede neue Zeile traegt Version 3", () => {
   const f = buildDataFlags({
     newsStatus: "ok",
     availability: { news: 3, priceStock: 5000, estimates: 4 },
     balanceRows: [],
     incomeRows: [],
   });
-  assert(METHODIK_VERSION === 2, "Konstante ist 2");
-  assert(f.methodik_version === 2, "methodik_version = 2");
+  assert(METHODIK_VERSION === 3, "Konstante ist 3 (Trend nach Spec, Variante A2)");
+  assert(f.methodik_version === 3, "methodik_version = 3");
 });
 
 Deno.test("llm_recovered: Standard false, true nur wenn gesetzt", () => {
