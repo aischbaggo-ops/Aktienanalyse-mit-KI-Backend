@@ -23,7 +23,8 @@
 // Konfiguration, nicht im Code verstreut.
 // ---------------------------------------------------------------------------
 
-import { underwaterPhases, notbremseTriggered, ampelLabel } from "./scoring.ts";
+import { underwaterPhases, notbremseTriggered } from "./underwater.ts";
+import { ampelLabel } from "./ampel.ts";
 
 export interface PriceRow {
   date: string;   // "YYYY-MM-DD", aufsteigend sortiert erwartet
