@@ -1,6 +1,6 @@
 import {
   regionForCountry, regionById, REGION_US, REGION_DE, REGION_STANDARD,
-  KRISEN_US, KRISEN_EU, KRISE_EUROKRISE, ALLE_REGIONEN,
+  KRISEN_US, KRISEN_EU, KRISE_EUROKRISE, ALLE_REGIONEN, resolveRegion, regionForIndex,
 } from "./region.ts";
 import { TREND3_CONFIG } from "./trend3.ts";
 import { computeScores } from "./scoring.ts";
@@ -115,4 +115,46 @@ Deno.test("Jede Region ist vollstaendig konfiguriert", () => {
   }
   const ids = ALLE_REGIONEN.map((r) => r.id);
   assert(new Set(ids).size === ids.length, "Kennungen eindeutig");
+});
+
+// --- Indexzugehoerigkeit geht dem Land vor (Fall Airbus) ------------------
+
+Deno.test("Airbus: im DAX, notiert in Paris - Index schlaegt Land", () => {
+  // AIR.PA steht in index_constituents unter 'dax', FMP meldet aber NL oder
+  // FR. Nach dem Land allein waere Airbus gegen den S&P mit
+  // US-Krisenfenstern gemessen worden.
+  const a = resolveRegion(["dax"], "NL");
+  assert(a.region === REGION_DE, "Region DE");
+  assert(a.region.benchmark === "^GDAXI", "gegen den DAX");
+  assert(a.quelle === "index", `Quelle index, war ${a.quelle}`);
+  assert(a.land === "NL", "Land bleibt dokumentiert");
+});
+
+Deno.test("Ohne Index entscheidet das Land, sonst Rueckfall mit Kennzeichen", () => {
+  const ausLand = resolveRegion([], "DE");
+  assert(ausLand.region === REGION_DE && ausLand.quelle === "land", "aus dem Land");
+
+  const ausIndex = resolveRegion(["sp500"], "US");
+  assert(ausIndex.region === REGION_US && ausIndex.quelle === "index", "aus dem Index");
+
+  // Unbekanntes Land ohne Index: kein Abbruch, aber als Rueckfall erkennbar.
+  const rueckfall = resolveRegion([], "FR");
+  assert(rueckfall.region === REGION_STANDARD, "Rueckfall auf die Standardregion");
+  assert(rueckfall.quelle === "rueckfall", `Quelle rueckfall, war ${rueckfall.quelle}`);
+  assert(rueckfall.land === "FR", "Land bleibt dokumentiert");
+
+  const garnichts = resolveRegion(null, null);
+  assert(garnichts.quelle === "rueckfall" && garnichts.region === REGION_STANDARD, "null/null");
+});
+
+Deno.test("Alle deutschen Indizes zeigen auf ^GDAXI", () => {
+  for (const id of ["dax", "mdax", "sdax", "DAX", " MDax "]) {
+    const r = regionForIndex(id);
+    assert(r === REGION_DE, `${id} -> DE`);
+  }
+  for (const id of ["sp500", "nasdaq100", "dowjones"]) {
+    assert(regionForIndex(id) === REGION_US, `${id} -> US`);
+  }
+  assert(regionForIndex("cac40") === null, "unbekannter Index");
+  assert(regionForIndex(null) === null, "null");
 });

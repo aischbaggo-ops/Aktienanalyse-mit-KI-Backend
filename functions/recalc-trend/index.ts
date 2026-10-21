@@ -7,7 +7,7 @@ import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { priceHistoryPaths, mergePriceResults } from "../_shared/priceHistory.ts";
 import { METHODIK_VERSION } from "../_shared/dataFlags.ts";
-import { regionForCountry } from "../_shared/region.ts";
+import { resolveRegion } from "../_shared/region.ts";
 import { resolveFmpSymbol } from "../_shared/tickerCheck.ts";
 import {
   computeTrend3, computeTotalWithTrend3, METHODIK_VERSION_TREND3,
@@ -230,6 +230,24 @@ Deno.serve(async (req) => {
     // Region. Pro Benchmark trotzdem nur ein Abruf - der Zwischenspeicher
     // haelt das Promise, nicht erst das Ergebnis, sonst wuerden die parallel
     // laufenden Ticker denselben Index mehrfach holen.
+    // Indexzugehoerigkeit fuer alle Ticker auf einmal: sie entscheidet vor
+    // dem Land, welcher Heimatindex gilt (siehe region.ts). Eine Abfrage
+    // statt einer je Ticker.
+    const indexMap = new Map<string, string[]>();
+    {
+      const { data, error } = await supabase
+        .from("index_constituents").select("ticker, index_id")
+        .in("ticker", rows.map((r) => r.ticker));
+      if (error) {
+        console.warn(`[recalc-trend] Indexzugehoerigkeit nicht lesbar: ${error.message}`);
+      }
+      for (const r of (data ?? []) as { ticker: string; index_id: string }[]) {
+        const liste = indexMap.get(r.ticker) ?? [];
+        liste.push(r.index_id);
+        indexMap.set(r.ticker, liste);
+      }
+    }
+
     const schluessel: string = fmpKey;
     const indexCache = new Map<string, Promise<{ rows: PriceRow[]; authError: boolean; ok: boolean }>>();
     function indexFor(symbol: string) {
@@ -257,7 +275,8 @@ Deno.serve(async (req) => {
         const land = prof.ok && Array.isArray(prof.data) && prof.data.length > 0
           ? ((prof.data[0] as { country?: string }).country ?? null)
           : null;
-        const region = regionForCountry(land);
+        const aufloesung = resolveRegion(indexMap.get(row.ticker), land);
+        const region = aufloesung.region;
 
         const indexPrices = await indexFor(region.benchmark);
         if (indexPrices.authError) {
@@ -304,6 +323,7 @@ Deno.serve(async (req) => {
           nicht_bewertbar: t3.nichtBewertbar,
           kurse: stock.rows.length,
           region: region.id,
+          region_quelle: aufloesung.quelle,
           benchmark: region.benchmark,
           ...(sym !== row.ticker ? { fmp_symbol: sym } : {}),
         };
@@ -332,6 +352,7 @@ Deno.serve(async (req) => {
             trend_recalc_at: new Date().toISOString(),
             benchmark_symbol: region.benchmark,
             region: region.id,
+            region_quelle: aufloesung.quelle,
           },
           priceMonthly: {
             stock: toMonthlySeries(stock.rows),

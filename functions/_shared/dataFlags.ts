@@ -92,6 +92,8 @@ export interface DataFlags {
   reported_currency: string | null;
   benchmark_symbol: string;
   region: string;
+  // "index", "land" oder "rueckfall" - macht sichtbar, worauf die Region beruht.
+  region_quelle: string;
   methodik_version: number;
   // true: Das Fangnetz fuer eingebettete Tool-Felder (rescueEmbeddedFields) hat
   // bei diesem Lauf Felder uebernommen oder einen Anzeigetext gekuerzt.
@@ -119,6 +121,7 @@ export function buildDataFlags(input: {
   incomeRows: any[];
   benchmarkSymbol?: string;
   region?: string;
+  regionQuelle?: string;
   llmRecovered?: boolean;
 }): DataFlags {
   return {
@@ -130,6 +133,7 @@ export function buildDataFlags(input: {
     reported_currency: reportedCurrencyFrom(input.balanceRows, input.incomeRows),
     benchmark_symbol: input.benchmarkSymbol ?? BENCHMARK_SYMBOL,
     region: input.region ?? "US",
+    region_quelle: input.regionQuelle ?? "rueckfall",
     methodik_version: METHODIK_VERSION,
     llm_recovered: input.llmRecovered ?? false,
   };

@@ -102,6 +102,26 @@ const NACH_LAND: Record<string, RegionConfig> = {
   DE: REGION_DE,
 };
 
+// Indexzugehoerigkeit aus index_constituents. Sie geht dem Land VOR: Airbus
+// steht im DAX, notiert aber in Paris und ist niederlaendisch registriert
+// (AIR.PA). Nach dem Land allein wuerde Airbus gegen den S&P mit
+// US-Krisenfenstern gemessen - fuer ein DAX-Mitglied offensichtlich falsch.
+// Ein Mitglied eines deutschen Index wird gegen den DAX gemessen, unabhaengig
+// vom Handelsplatz.
+const NACH_INDEX: Record<string, RegionConfig> = {
+  dax: REGION_DE,
+  mdax: REGION_DE,
+  sdax: REGION_DE,
+  sp500: REGION_US,
+  nasdaq100: REGION_US,
+  dowjones: REGION_US,
+};
+
+export function regionForIndex(indexId: string | null | undefined): RegionConfig | null {
+  if (!indexId) return null;
+  return NACH_INDEX[indexId.trim().toLowerCase()] ?? null;
+}
+
 export const REGION_STANDARD = REGION_US;
 
 // Ein unbekanntes Land faellt bewusst auf die US-Konfiguration zurueck statt
@@ -120,3 +140,31 @@ export function regionById(id: string | null | undefined): RegionConfig {
 }
 
 export const ALLE_REGIONEN: RegionConfig[] = [REGION_US, REGION_DE];
+
+// Woher die Region stammt. Steht in den data_flags, damit ein Rueckfall
+// sichtbar ist und nicht stillschweigend als Tatsache durchgeht.
+export type RegionQuelle = "index" | "land" | "rueckfall";
+
+export interface RegionAufloesung {
+  region: RegionConfig;
+  quelle: RegionQuelle;
+  land: string | null;
+  indizes: string[];
+}
+
+// Reihenfolge: Indexzugehoerigkeit, dann Land, dann Rueckfall. Der Rueckfall
+// bleibt die US-Konfiguration (ein harter Fehler wuerde bestehende Analysen
+// abbrechen), ist aber ueber quelle = "rueckfall" erkennbar.
+export function resolveRegion(
+  indizes: string[] | null | undefined,
+  land: string | null | undefined,
+): RegionAufloesung {
+  const ids = (indizes ?? []).filter((x): x is string => typeof x === "string" && x.length > 0);
+  for (const id of ids) {
+    const r = regionForIndex(id);
+    if (r) return { region: r, quelle: "index", land: land ?? null, indizes: ids };
+  }
+  const nachLand = land ? NACH_LAND[land.trim().toUpperCase()] : undefined;
+  if (nachLand) return { region: nachLand, quelle: "land", land: land ?? null, indizes: ids };
+  return { region: REGION_STANDARD, quelle: "rueckfall", land: land ?? null, indizes: ids };
+}
