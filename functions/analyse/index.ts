@@ -9,7 +9,8 @@ import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logAppEvent } from "../_shared/appEvents.ts";
 import { detectLlmAnomaly, missingScoreParts as listMissingScoreParts } from "../_shared/llm/diagnostics.ts";
 import { mergePriceResults, priceHistoryPaths } from "../_shared/priceHistory.ts";
-import { BENCHMARK_SYMBOL, buildDataFlags, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
+import { buildDataFlags, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../_shared/dataFlags.ts";
+import { resolveRegion } from "../_shared/region.ts";
 import { trend3ChartBlock, SCORE_INCOMPLETE_CODE, NICHT_BEWERTBAR_PUBLIC } from "../_shared/trend3.ts";
 import { fetchNews } from "../_shared/news.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
@@ -176,15 +177,45 @@ async function fmpGet(path: string, fmpKey: string, ticker: string) {
   }
 }
 
+// Indexzugehoerigkeit aus index_constituents. Sie entscheidet vor dem Land,
+// welcher Heimatindex gilt (siehe region.ts). Ein Fehler hier darf die
+// Analyse nicht abbrechen - dann zaehlt eben das Land.
+async function ladeIndizes(ticker: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("index_constituents").select("index_id").eq("ticker", ticker);
+  if (error) {
+    console.warn(`[analyse] Indexzugehoerigkeit fuer ${ticker} nicht lesbar: ${error.message}`);
+    return [];
+  }
+  return (data ?? []).map((r: { index_id: string }) => r.index_id);
+}
+
 async function fetchFmpData(ticker: string, fmpKey: string) {
   // Aktiengattungen (BRK.B / BRK-B): FMP kennt je nach Endpunkt nur eine
   // Schreibweise. Nur bei solchen Tickern ein Vorab-Profilaufruf; gespeichert
   // und angezeigt wird weiter die Eingabe, nur die FMP-Aufrufe nutzen sym.
   const sym = await resolveFmpSymbol(ticker, (s) => fmpGet(`/profile?symbol=${encodeURIComponent(s)}`, fmpKey, ticker));
-  const [stockOld, stockNew] = priceHistoryPaths(sym);
-  const [indexOld, indexNew] = priceHistoryPaths(BENCHMARK_SYMBOL);
-  const [profile, peers, income, balance, cashflow, estimates, dcf, news, priceStockOld, priceStockNew, priceIndexOld, priceIndexNew, scores, priceTargetSummary, grades] = await Promise.all([
+
+  // Methodik 4: Das Profil wird VORGEZOGEN, weil erst sein Laenderkennzeichen
+  // sagt, welcher Index der Heimatindex ist. Vorher war ^GSPC fest verdrahtet
+  // und konnte parallel mit allem anderen geladen werden. Das kostet einen
+  // zusaetzlichen Rundlauf je Analyse; die Alternative waere, den Index
+  // nachzuladen, was dieselbe Zeit braucht.
+  const [profile, indizes] = await Promise.all([
     fmpGet(`/profile?symbol=${sym}`, fmpKey, ticker),
+    ladeIndizes(ticker),
+  ]);
+  const land = (first(profile) as { country?: string } | null)?.country ?? null;
+  const aufloesung = resolveRegion(indizes, land);
+  const region = aufloesung.region;
+  if (aufloesung.quelle === "rueckfall") {
+    console.warn(`[analyse] ${ticker}: weder Index noch bekanntes Land (${land ?? "ohne"}), ` +
+      `rechnet mit der ${region.name}-Konfiguration`);
+  }
+
+  const [stockOld, stockNew] = priceHistoryPaths(sym);
+  const [indexOld, indexNew] = priceHistoryPaths(region.benchmark);
+  const [peers, income, balance, cashflow, estimates, dcf, news, priceStockOld, priceStockNew, priceIndexOld, priceIndexNew, scores, priceTargetSummary, grades] = await Promise.all([
     fmpGet(`/stock-peers?symbol=${sym}`, fmpKey, ticker),
     fmpGet(`/income-statement?symbol=${sym}&period=annual&limit=5`, fmpKey, ticker),
     fmpGet(`/balance-sheet-statement?symbol=${sym}&period=annual&limit=5`, fmpKey, ticker),
@@ -219,7 +250,7 @@ async function fetchFmpData(ticker: string, fmpKey: string) {
     profile, peers, income, balance, cashflow, estimates, dcf,
     priceStockOld, priceStockNew, priceIndexOld, priceIndexNew, scores, priceTargetSummary, grades,
   };
-  return { ticker, profile, peers, income, balance, cashflow, estimates, dcf, news: newsForScoring, newsStatus: news.status, newsSource: news.source, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError, raw };
+  return { ticker, region, regionQuelle: aufloesung.quelle, profile, peers, income, balance, cashflow, estimates, dcf, news: newsForScoring, newsStatus: news.status, newsSource: news.source, priceStock, priceIndex, scores, priceTargetSummary, grades, fmpAuthError, raw };
 }
 
 // ---------- Der komplette Analyse-Lauf (laeuft im Hintergrund weiter) ----------
@@ -264,7 +295,7 @@ async function runAnalysis(
     // nicht" (siehe _shared/fmpStatus.ts).
     const noProfile = profileAbort(fmpData.profile);
     if (noProfile) throw noProfile;
-    const scoreData = computeScores(fmpData);
+    const scoreData = computeScores(fmpData, fmpData.region);
     if (!scoreData.profile) throw profileAbort({ ok: true, data: [] })!;
 
     const stability = computeStabilityScore(
@@ -280,11 +311,12 @@ async function runAnalysis(
       : null;
     const sharesOutForPrognose = scoreData.profile?.sharesOutstanding ?? lastKnownShares ?? null;
 
-    const prognose = computePrognose(
-      fmpData,
-      scoreData.profile?.price ?? null,
-      sharesOutForPrognose,
-    );
+    // Die Prognose (Kursziele aus Multiples) ist auf US-Verhaeltnisse
+    // zugeschnitten - Multiples, Analystenschaetzungen und Marktusancen.
+    // Entscheidung vom 20.10.2026: fuer Nicht-US-Regionen bleibt sie aus.
+    const prognose = fmpData.region.prognose
+      ? computePrognose(fmpData, scoreData.profile?.price ?? null, sharesOutForPrognose)
+      : null;
 
     const valuation = computeValuation(
       scoreData.fundamentalSeries,
@@ -596,6 +628,9 @@ async function runAnalysis(
           balanceRows: arr(fmpData.balance),
           incomeRows: arr(fmpData.income),
           llmRecovered: llmRecoveredFrom(recoveryRuns) || parsed.swotRecovered,
+          benchmarkSymbol: fmpData.region.benchmark,
+          region: fmpData.region.id,
+          regionQuelle: fmpData.regionQuelle,
         }),
         analystConsensus,
         bankRatings,

@@ -77,7 +77,11 @@ export function reportedCurrencyFrom(balanceRows: any[], incomeRows: any[]): str
 // Erhoehen, sobald eine Aenderung Scores aelterer Zeilen nicht mehr
 // vergleichbar macht. Version 2: Kurshistorie in zwei Fenstern ab 2000 (PR #35,
 // Dotcom-Phase jetzt enthalten) aendert Krise- und Trend-Score.
-export const METHODIK_VERSION = 3;
+// 4 seit Methodik 4 (Region je Aktie: Heimatindex, Krisenfenster und
+// CAGR-Schwelle haengen am Land). Fuer US-Werte rechnet die Region-Fassung
+// bitgleich wie Methodik 3 - die Nummer sagt, WIE gerechnet wurde, nicht
+// dass sich der Wert geaendert haette.
+export const METHODIK_VERSION = 4;
 
 export interface DataFlags {
   news_status: NewsStatus;
@@ -87,6 +91,9 @@ export interface DataFlags {
   estimates_count: number;
   reported_currency: string | null;
   benchmark_symbol: string;
+  region: string;
+  // "index", "land" oder "rueckfall" - macht sichtbar, worauf die Region beruht.
+  region_quelle: string;
   methodik_version: number;
   // true: Das Fangnetz fuer eingebettete Tool-Felder (rescueEmbeddedFields) hat
   // bei diesem Lauf Felder uebernommen oder einen Anzeigetext gekuerzt.
@@ -113,6 +120,8 @@ export function buildDataFlags(input: {
   balanceRows: any[];
   incomeRows: any[];
   benchmarkSymbol?: string;
+  region?: string;
+  regionQuelle?: string;
   llmRecovered?: boolean;
 }): DataFlags {
   return {
@@ -123,6 +132,8 @@ export function buildDataFlags(input: {
     estimates_count: input.availability.estimates,
     reported_currency: reportedCurrencyFrom(input.balanceRows, input.incomeRows),
     benchmark_symbol: input.benchmarkSymbol ?? BENCHMARK_SYMBOL,
+    region: input.region ?? "US",
+    region_quelle: input.regionQuelle ?? "rueckfall",
     methodik_version: METHODIK_VERSION,
     llm_recovered: input.llmRecovered ?? false,
   };

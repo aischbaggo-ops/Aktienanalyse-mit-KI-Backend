@@ -6,7 +6,8 @@ import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { priceHistoryPaths, mergePriceResults } from "../_shared/priceHistory.ts";
-import { BENCHMARK_SYMBOL } from "../_shared/dataFlags.ts";
+import { METHODIK_VERSION } from "../_shared/dataFlags.ts";
+import { resolveRegion } from "../_shared/region.ts";
 import { resolveFmpSymbol } from "../_shared/tickerCheck.ts";
 import {
   computeTrend3, computeTotalWithTrend3, METHODIK_VERSION_TREND3,
@@ -225,11 +226,37 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Der Index ist fuer alle Ticker derselbe: einmal laden statt 514-mal.
-    const indexPrices = await fetchPrices(BENCHMARK_SYMBOL, fmpKey, BENCHMARK_SYMBOL);
-    if (indexPrices.authError) return json({ error: "FMP-Schluessel ungueltig oder abgelaufen." }, 502);
-    if (indexPrices.rows.length < 2) {
-      return json({ error: "Keine Indexkurse von FMP erhalten, Neuberechnung nicht moeglich." }, 502);
+    // Methodik 4: nicht mehr EIN Index fuer alle, sondern der Heimatindex je
+    // Region. Pro Benchmark trotzdem nur ein Abruf - der Zwischenspeicher
+    // haelt das Promise, nicht erst das Ergebnis, sonst wuerden die parallel
+    // laufenden Ticker denselben Index mehrfach holen.
+    // Indexzugehoerigkeit fuer alle Ticker auf einmal: sie entscheidet vor
+    // dem Land, welcher Heimatindex gilt (siehe region.ts). Eine Abfrage
+    // statt einer je Ticker.
+    const indexMap = new Map<string, string[]>();
+    {
+      const { data, error } = await supabase
+        .from("index_constituents").select("ticker, index_id")
+        .in("ticker", rows.map((r) => r.ticker));
+      if (error) {
+        console.warn(`[recalc-trend] Indexzugehoerigkeit nicht lesbar: ${error.message}`);
+      }
+      for (const r of (data ?? []) as { ticker: string; index_id: string }[]) {
+        const liste = indexMap.get(r.ticker) ?? [];
+        liste.push(r.index_id);
+        indexMap.set(r.ticker, liste);
+      }
+    }
+
+    const schluessel: string = fmpKey;
+    const indexCache = new Map<string, Promise<{ rows: PriceRow[]; authError: boolean; ok: boolean }>>();
+    function indexFor(symbol: string) {
+      let p = indexCache.get(symbol);
+      if (!p) {
+        p = fetchPrices(symbol, schluessel, symbol);
+        indexCache.set(symbol, p);
+      }
+      return p;
     }
 
     for (let i = 0; i < rows.length; i += CONCURRENCY) {
@@ -238,13 +265,34 @@ Deno.serve(async (req) => {
         // FMP schreibt Ticker mit Punkt anders: BRK.B heisst dort BRK-B.
         // Ohne diese Aufloesung liefert die Kursabfrage nichts und der Ticker
         // wird stillschweigend uebersprungen (BF.B und BRK.B am 20.10.2026).
-        // analyse macht das seit jeher ueber dieselbe Funktion. Fuer Ticker
-        // ohne Punkt oder Bindestrich kostet das keinen zusaetzlichen Aufruf,
-        // resolveFmpSymbol kehrt dann sofort zurueck.
         const sym = await resolveFmpSymbol(
           row.ticker,
           (s) => fmpGet(`/profile?symbol=${encodeURIComponent(s)}`, fmpKey, row.ticker),
         );
+        // Methodik 4: Das Land bestimmt den Heimatindex, die Krisenfenster und
+        // die CAGR-Schwelle. Es steht nur im Profil, also wird es hier geholt.
+        const prof = await fmpGet(`/profile?symbol=${encodeURIComponent(sym)}`, fmpKey, row.ticker);
+        const land = prof.ok && Array.isArray(prof.data) && prof.data.length > 0
+          ? ((prof.data[0] as { country?: string }).country ?? null)
+          : null;
+        const aufloesung = resolveRegion(indexMap.get(row.ticker), land);
+        const region = aufloesung.region;
+
+        const indexPrices = await indexFor(region.benchmark);
+        if (indexPrices.authError) {
+          results.push({ ticker: row.ticker, uebersprungen: "FMP-Schluessel ungueltig" });
+          uebersprungen++;
+          return;
+        }
+        if (indexPrices.rows.length < 2) {
+          results.push({
+            ticker: row.ticker,
+            uebersprungen: `keine Kurse fuer den Heimatindex ${region.benchmark}`,
+          });
+          uebersprungen++;
+          return;
+        }
+
         const stock = await fetchPrices(sym, fmpKey, row.ticker);
         if (stock.authError) {
           results.push({ ticker: row.ticker, uebersprungen: "FMP-Schluessel ungueltig" });
@@ -257,7 +305,7 @@ Deno.serve(async (req) => {
           return;
         }
 
-        const t3 = computeTrend3(stock.rows, indexPrices.rows);
+        const t3 = computeTrend3(stock.rows, indexPrices.rows, region.trend);
         const totalNeu = computeTotalWithTrend3(
           row.score_fundamental, row.score_qualitaet, row.score_krise, t3.score,
         );
@@ -274,6 +322,9 @@ Deno.serve(async (req) => {
           kennzahlen: t3.kennzahlen,
           nicht_bewertbar: t3.nichtBewertbar,
           kurse: stock.rows.length,
+          region: region.id,
+          region_quelle: aufloesung.quelle,
+          benchmark: region.benchmark,
           ...(sym !== row.ticker ? { fmp_symbol: sym } : {}),
         };
 
@@ -297,8 +348,11 @@ Deno.serve(async (req) => {
           trend: trend3ChartBlock(t3),
           data_flags: {
             ...flagsAlt,
-            methodik_version: METHODIK_VERSION_TREND3,
+            methodik_version: METHODIK_VERSION,
             trend_recalc_at: new Date().toISOString(),
+            benchmark_symbol: region.benchmark,
+            region: region.id,
+            region_quelle: aufloesung.quelle,
           },
           priceMonthly: {
             stock: toMonthlySeries(stock.rows),
@@ -358,7 +412,11 @@ Deno.serve(async (req) => {
         ? Math.round(mitBeiden.reduce((s, r) => s + (r.delta as number), 0) / mitBeiden.length * 100) / 100
         : null,
       schwellen: TREND3_CONFIG,
-      indexkurse: indexPrices.rows.length,
+      indizes: await (async () => {
+        const out: Record<string, number> = {};
+        for (const [sym, p] of indexCache) out[sym] = (await p).rows.length;
+        return out;
+      })(),
     };
     return json({ ...summary, ergebnisse: results.sort((a, b) => String(a.ticker).localeCompare(String(b.ticker))) });
   } catch (e) {

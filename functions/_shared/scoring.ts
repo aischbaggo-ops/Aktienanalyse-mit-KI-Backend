@@ -1,4 +1,11 @@
 import { computeTrend3 } from "./trend3.ts";
+import { ampelLabel } from "./ampel.ts";
+import { underwaterPhases, notbremseTriggered, NOTBREMSE_MIN_YEARS, NOTBREMSE_WINDOW_YEARS, type UnderwaterPhase } from "./underwater.ts";
+
+// Weiterhin von hier exportiert, damit bestehende Importe unveraendert laufen.
+export { ampelLabel, underwaterPhases, notbremseTriggered, NOTBREMSE_MIN_YEARS, NOTBREMSE_WINDOW_YEARS };
+export type { UnderwaterPhase };
+import { REGION_STANDARD, type RegionConfig } from "./region.ts";
 import { buildNewsSummary } from "./dataFlags.ts";
 
 export function ok(x: any) { return x && x.ok && x.data; }
@@ -45,10 +52,6 @@ function thresholdAmpelInverse(value: number | null, greenIfAbove: number, yello
   if (value >= yellowIfAbove) return 0.5;
   return 0;
 }
-export function ampelLabel(a: number | null) {
-  if (a === null) return "grau";
-  return a === 1 ? "gruen" : a === 0.5 ? "gelb" : "rot";
-}
 function subScore(pflicht: { a: number | null; w: number }[]): number | null {
   let numerator = 0, denominator = 0;
   for (const { a, w } of pflicht) {
@@ -68,59 +71,7 @@ function combineHistProg(histA: number | null, progA: number | null): number | n
   return Math.min(histA, progA);
 }
 
-// ---------- UNTERWASSER-PHASEN / NOTBREMSE (Spec Legrand_Score_Algorithmus.md, Trend) ----------
-const YEAR_MS = 365.25 * 24 * 3600 * 1000;
-
-export interface UnderwaterPhase {
-  start: Date;
-  end: Date;
-  years: number;
-  // true: Phase dauert am letzten Kurstermin noch an.
-  open: boolean;
-}
-
-// rows: aufsteigend nach Datum. Eine Phase beginnt mit dem ersten Schlusskurs
-// unter dem bisherigen Hoch und endet mit dem ersten Schlusskurs auf oder
-// ueber diesem Hoch.
-export function underwaterPhases(rows: { date: string; close: number }[]): UnderwaterPhase[] {
-  const phases: UnderwaterPhase[] = [];
-  if (!rows.length) return phases;
-  let peak = rows[0].close;
-  let start: Date | null = null;
-  for (const r of rows) {
-    if (r.close >= peak) {
-      peak = r.close;
-      if (start) {
-        const end = new Date(r.date);
-        phases.push({ start, end, years: (+end - +start) / YEAR_MS, open: false });
-        start = null;
-      }
-    } else if (!start) {
-      start = new Date(r.date);
-    }
-  }
-  if (start) {
-    const end = new Date(rows[rows.length - 1].date);
-    phases.push({ start, end, years: (+end - +start) / YEAR_MS, open: true });
-  }
-  return phases;
-}
-
-export const NOTBREMSE_MIN_YEARS = 7;
-export const NOTBREMSE_WINDOW_YEARS = 15;
-
-// Notbremse: eine Phase laenger als 7 Jahre, die in den letzten rund 15 Jahren
-// vor asOf lag. "Lag in den letzten 15 Jahren" heisst hier: die Phase reicht
-// in dieses Fenster hinein (Ende oder laufende Phase), nicht erst ihr Beginn -
-// sonst bliebe ein seit 18 Jahren anhaltender Seitwaertssumpf ohne Notbremse.
-// Eine Phase, die vor dem Fenster endete (reine Alt-Durststrecke), loest sie
-// nicht aus.
-export function notbremseTriggered(phases: UnderwaterPhase[], asOf: Date): boolean {
-  const cutoff = new Date(+asOf - NOTBREMSE_WINDOW_YEARS * YEAR_MS);
-  return phases.some((p) => p.years > NOTBREMSE_MIN_YEARS && p.end >= cutoff);
-}
-
-export function computeScores(d: any) {
+export function computeScores(d: any, region: RegionConfig = REGION_STANDARD) {
   const profile = first(d.profile);
   const incomeRaw = arr(d.income).slice().sort((a: any, b: any) => +new Date(a.date) - +new Date(b.date));
   const balanceRaw = arr(d.balance).slice().sort((a: any, b: any) => +new Date(a.date) - +new Date(b.date));
@@ -282,13 +233,9 @@ export function computeScores(d: any) {
     return maxDD;
   }
 
-  const crises = [
-    { name: "Dotcom", from: "2000-01-01", to: "2002-12-31", r: 0.3 },
-    { name: "Finanzkrise", from: "2007-10-01", to: "2009-03-31", r: 0.55 },
-    { name: "Corona", from: "2020-01-01", to: "2020-12-31", r: 1.0 },
-    { name: "Zins/Inflation", from: "2022-01-01", to: "2022-12-31", r: 1.15 },
-    { name: "Zoll", from: "2025-01-01", to: "2025-12-31", r: 1.3 },
-  ];
+  // Methodik 4: Die Fenster kommen aus der Region. Fuer die USA sind es
+  // dieselben fuenf wie bisher, fuer Europa zusaetzlich die Eurokrise.
+  const crises = region.crises;
   const crisisDetail = crises.map((c) => {
     const ddStock = maxDrawdownInWindow(stockRows, c.from, c.to);
     const ddIndex = maxDrawdownInWindow(indexRows, c.from, c.to);
@@ -320,7 +267,7 @@ export function computeScores(d: any) {
   // gewichtet mit 2/1/0,5, echter geometrischer CAGR, Aktie und Index je
   // Fenster ueber denselben Zeitraum (Spec Abschnitt 6, Variante A2).
   // recalc-trend nutzt dieselbe Funktion - es gibt bewusst nur eine Fassung.
-  const trend3 = computeTrend3(stockRows, indexRows);
+  const trend3 = computeTrend3(stockRows, indexRows, region.trend);
   const scoreTrend = trend3.score;
 
   // Jahresrenditen auf KALENDERJAHREN. Sie tragen den Trend-Score nicht mehr
@@ -420,6 +367,7 @@ export function computeScores(d: any) {
 
   return {
     ticker: d.ticker,
+    region: { id: region.id, name: region.name, benchmark: region.benchmark },
     dataAvailability,
     profileSummary,
     peersSummary,
