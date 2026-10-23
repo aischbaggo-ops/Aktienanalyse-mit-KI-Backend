@@ -7,6 +7,7 @@
 // verwarf deshalb ALLE Eintraege. /profile?symbol=X (einzeln) ist dieselbe
 // Abfrage, auf die analyse seit jeher aufbaut.
 import { classifyFmpResult, type FmpClass, type FmpResultLike } from "./fmpStatus.ts";
+import type { FmpTreffer } from "./kollision.ts";
 
 // Referenz-Ticker: Liefert ein Lauf NUR leere Antworten, wird er einzeln
 // nachgefragt. Kennt FMP auch AAPL nicht, ist die Pruefung kaputt (nicht die
@@ -33,6 +34,25 @@ export function hasProfile(r: FmpResultLike): boolean {
   return r.data.some((p) => p && typeof p === "object" && String((p as { symbol?: unknown }).symbol ?? "").length > 0);
 }
 
+// Firma, Waehrung und Land aus dem bereits geholten Profil. Kostet keinen
+// zusaetzlichen Aufruf und ist die Grundlage der Kollisionswarnung: erst
+// damit sieht der Nutzer, dass hinter "ADS" Bread Financial steckt.
+export function profilDaten(r: FmpResultLike): FmpTreffer | null {
+  if (!Array.isArray(r.data)) return null;
+  const p = r.data.find((x) => x && typeof x === "object") as Record<string, unknown> | undefined;
+  if (!p) return null;
+  const text = (k: string) => {
+    const v = p[k];
+    return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+  };
+  return {
+    name: text("companyName"),
+    currency: text("currency"),
+    country: text("country"),
+    exchange: text("exchangeShortName") ?? text("exchange"),
+  };
+}
+
 export type TickerCheckFailure = "plan" | "rate_limit" | "auth" | "outage" | "network" | "other" | "no_results";
 
 export interface TickerCheckResult {
@@ -40,6 +60,9 @@ export interface TickerCheckResult {
   // Schreibweise, mit der FMP den Ticker kennt, falls sie von der Eingabe
   // abweicht (nur fuer FMP-Aufrufe, die Anzeige bleibt die Eingabe).
   fmpSymbols: Record<string, string>;
+  // Firma, Waehrung, Land je bestaetigtem Ticker - fuer die
+  // Kollisionswarnung (siehe kollision.ts).
+  profiles: Record<string, FmpTreffer>;
   // Gesetzt = Pruefung nicht aussagekraeftig (Client uebernimmt ungeprueft).
   failure: TickerCheckFailure | null;
   failureStatus: number | null;
@@ -54,7 +77,14 @@ export async function checkTickers(
   opts: { concurrency?: number } = {},
 ): Promise<TickerCheckResult> {
   const concurrency = Math.max(1, opts.concurrency ?? 10);
-  const result: TickerCheckResult = { valid: [], fmpSymbols: {}, failure: null, failureStatus: null, calls: 0 };
+  const result: TickerCheckResult = {
+    valid: [],
+    fmpSymbols: {},
+    profiles: {},
+    failure: null,
+    failureStatus: null,
+    calls: 0,
+  };
   const found = new Set<string>();
   let aborted = false;
 
@@ -86,6 +116,8 @@ export async function checkTickers(
       if (hasProfile(r)) {
         found.add(t);
         if (variant !== t) result.fmpSymbols[t] = variant;
+        const p = profilDaten(r);
+        if (p) result.profiles[t] = p;
         return;
       }
     }

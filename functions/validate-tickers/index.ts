@@ -3,7 +3,9 @@ import { verifyUser } from "../_shared/auth.ts";
 import { loadUserApiKeys } from "../_shared/userKeys.ts";
 import { logApiCall } from "../_shared/apiCallLog.ts";
 import { checkTickers, failureMessage } from "../_shared/tickerCheck.ts";
+import { findeKollisionen, istPunktlos, type Konstituent } from "../_shared/kollision.ts";
 import type { FmpResultLike } from "../_shared/fmpStatus.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // Prueft eine Liste von Ticker-KANDIDATEN (z.B. aus dem Freitext-Parser,
 // siehe tickerParser.ts) gegen echte FMP-Profildaten, BEVOR sie in einen
@@ -20,6 +22,27 @@ import type { FmpResultLike } from "../_shared/fmpStatus.ts";
 // ueber symbol-search (60/Stunde).
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const MAX_TICKERS = 100;
+
+const supabase = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+);
+
+// Alle Indexeintraege MIT Boersenzusatz - nur die koennen einen punktlosen
+// Kandidaten verdraengen. Das sind knapp hundert Zeilen (DAX und MDAX, spaeter
+// SDAX), eine einzige Abfrage ohne Filterbasteleien. Faellt sie aus, entfaellt
+// die Warnung; die Pruefung selbst bleibt gueltig - fail-open wie der Rest
+// dieser Function.
+async function ladeZwillinge(kandidaten: string[]): Promise<Konstituent[]> {
+  if (!kandidaten.some(istPunktlos)) return [];
+  const { data, error } = await supabase
+    .from("index_constituents").select("ticker, company_name").like("ticker", "%.%");
+  if (error) {
+    console.warn(`[validate-tickers] Indexlisten nicht lesbar: ${error.message}`);
+    return [];
+  }
+  return (data ?? []) as Konstituent[];
+}
 
 Deno.serve(async (req) => {
   const corsHeaders = corsFor(req);
@@ -111,7 +134,17 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    return new Response(JSON.stringify({ valid: r.valid, fmp_symbols: r.fmpSymbols }), {
+    // Kollisionswarnung: ein punktloses Kuerzel, zu dem es einen
+    // Indexeintrag MIT Endung gibt, ist fast immer ein Versehen - FMP
+    // liefert dann das gleichnamige US-Papier (21.10.2026: 14 fremde Firmen
+    // in der Datenbank). Der Ticker bleibt gueltig, der Client nimmt ihn nur
+    // aus der Vorauswahl und bietet die Schreibweise mit Endung an.
+    const kollisionen = findeKollisionen(r.valid, await ladeZwillinge(r.valid), r.profiles);
+    if (kollisionen.length > 0) {
+      console.log(`[validate-tickers] ${kollisionen.length} moegliche Verwechslung(en): ` +
+        kollisionen.map((k) => `${k.eingabe}->${k.vorschlag}`).join(", "));
+    }
+    return new Response(JSON.stringify({ valid: r.valid, fmp_symbols: r.fmpSymbols, kollisionen }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
