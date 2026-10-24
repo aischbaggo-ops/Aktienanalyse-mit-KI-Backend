@@ -35,13 +35,25 @@ const supabase = createClient(
 // dieser Function.
 async function ladeZwillinge(kandidaten: string[]): Promise<Konstituent[]> {
   if (!kandidaten.some(istPunktlos)) return [];
+  // Die Spalte heisst "name", nicht "company_name" - ein falsch geratener
+  // Spaltenname hat die Warnung beim ersten Deploy still verschluckt
+  // (23.10.2026, fail-open: Pruefung lief, Warnung fehlte).
   const { data, error } = await supabase
-    .from("index_constituents").select("ticker, company_name").like("ticker", "%.%");
+    .from("index_constituents").select("ticker, name").like("ticker", "%.%");
   if (error) {
     console.warn(`[validate-tickers] Indexlisten nicht lesbar: ${error.message}`);
     return [];
   }
-  return (data ?? []) as Konstituent[];
+  const zeilen = (data ?? []) as { ticker: string; name: string | null }[];
+  // Keine einzige Zeile mit Boersenzusatz waere kein normaler Zustand,
+  // sondern ein Hinweis auf leere oder umbenannte Indexlisten. Ohne diese
+  // Meldung faellt der Schutz lautlos aus - genau das ist beim ersten
+  // Deploy passiert.
+  if (zeilen.length === 0) {
+    console.warn("[validate-tickers] index_constituents enthaelt keine Ticker mit Boersenzusatz - " +
+      "Kollisionswarnung ist wirkungslos.");
+  }
+  return zeilen.map((r) => ({ ticker: r.ticker, company_name: r.name })) as Konstituent[];
 }
 
 Deno.serve(async (req) => {
