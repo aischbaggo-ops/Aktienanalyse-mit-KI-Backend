@@ -8,8 +8,10 @@ import { getSp500Weight, getNasdaq100Weight, getDowJonesWeight } from "../_share
 // in den Indizes, in denen er laut der bereits vorhandenen Tabelle
 // index_constituents Mitglied ist. Rein informative Zusatzanzeige auf der
 // Analyse-Seite - kein Einfluss auf Score/Sortierung, keine Speicherung
-// (Auftrag). DAX/MDAX/SDAX sind wie ueberall sonst deaktiviert
-// (INDEX_DEFINITIONS.enabled), werden hier also nie geprueft.
+// (Auftrag). DAX und MDAX sind seit dem 24.10.2026 aktiviert, haben hier
+// aber bewusst keinen Eintrag in WEIGHT_GETTERS: fuer deutsche Indizes
+// gibt es keine ETF-Holdings-Datei als Gewichtungsquelle. Sie fallen
+// deshalb unten durch den Filter und werden weiterhin nie abgefragt.
 //
 // Ablauf: erst in index_constituents nachsehen, in welchen (aktivierten)
 // Indizes der Ticker ueberhaupt Mitglied ist (vermeidet unnoetige Live-
