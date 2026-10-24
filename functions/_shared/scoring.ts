@@ -52,6 +52,40 @@ function thresholdAmpelInverse(value: number | null, greenIfAbove: number, yello
   if (value >= yellowIfAbove) return 0.5;
   return 0;
 }
+// Ausgeschuettete Dividende eines Geschaeftsjahres (Cashflow-Rechnung), als
+// positiver Betrag. Die stable-API von FMP fuehrt das Feld als
+// commonDividendsPaid (Stammaktien) bzw. netDividendsPaid (inkl.
+// Vorzugsaktien); "dividendsPaid" war der Name der alten API und kam seit dem
+// ersten Lauf (07.10.2026) nie an - kein einziger Wert galt als
+// Dividendenzahler, die drei Dividendenkriterien liefen nie (belegt am
+// 24.10.2026, claude/fmp_europa_test_zusatz_20261024_154937.json).
+// Stammaktien zuerst: um deren Dividende geht es in den Kriterien.
+const DIVIDENDEN_FELDER = ["commonDividendsPaid", "netDividendsPaid", "dividendsPaid"] as const;
+export function dividendeAusCashflow(c: any): number | null {
+  for (const feld of DIVIDENDEN_FELDER) {
+    const v = c?.[feld];
+    if (typeof v === "number" && !isNaN(v)) return Math.abs(v);
+  }
+  return null;
+}
+
+// Ausschuettungsquote Dividende / Basis (Gewinn oder FCF) als Ampel samt
+// Begruendung. Eine Dividende bei Verlust oder negativem FCF ist ROT:
+// thresholdAmpel() wuerde die dann negative Quote als "<= 60 %" werten und
+// gruen geben. Solange die Dividendenkriterien wegen des Feldnamens nie
+// liefen, fiel das nicht auf.
+export function ausschuettungsAmpel(
+  dividende: number | null | undefined, basis: number | null | undefined,
+  basisName: string, negativName: string,
+): [number | null, string] {
+  if (!dividende || typeof basis !== "number" || isNaN(basis) || basis === 0) {
+    return [null, "Nicht berechenbar."];
+  }
+  if (basis < 0) return [0, `Dividende trotz ${negativName}.`];
+  const quote = dividende / basis;
+  return [thresholdAmpel(quote, 0.6, 1.0), `Ausschuettungsquote vs. ${basisName} ${(quote * 100).toFixed(0)}%.`];
+}
+
 function subScore(pflicht: { a: number | null; w: number }[]): number | null {
   let numerator = 0, denominator = 0;
   for (const { a, w } of pflicht) {
@@ -196,7 +230,7 @@ export function computeScores(d: any, region: RegionConfig = REGION_STANDARD) {
       gwRatio !== null ? `Goodwill-Anteil ${(gwRatio * 100).toFixed(1)}%.` : "Nicht verfuegbar.");
   }
 
-  const dividendsPaid = cashflowRaw.map((c: any) => (typeof c.dividendsPaid === "number" ? Math.abs(c.dividendsPaid) : null));
+  const dividendsPaid = cashflowRaw.map(dividendeAusCashflow);
   const isDividendPayer = dividendsPaid.some((x: number | null) => x && x > 0);
   if (isDividendPayer) {
     const last20 = dividendsPaid.slice(-20);
@@ -206,14 +240,10 @@ export function computeScores(d: any, region: RegionConfig = REGION_STANDARD) {
 
     const lastNI = netIncome.slice(-1)[0];
     const lastDiv = dividendsPaid.slice(-1)[0];
-    const payoutNI = lastNI && lastDiv ? lastDiv / lastNI : null;
-    addF("Dividende <= Gewinn", "Normal", 1, thresholdAmpel(payoutNI, 0.6, 1.0),
-      payoutNI !== null ? `Ausschuettungsquote vs. Gewinn ${(payoutNI * 100).toFixed(0)}%.` : "Nicht berechenbar.");
+    addF("Dividende <= Gewinn", "Normal", 1, ...ausschuettungsAmpel(lastDiv, lastNI, "Gewinn", "Verlust"));
 
     const lastFCF = freeCashFlow.slice(-1)[0];
-    const payoutFCF = lastFCF && lastDiv ? lastDiv / lastFCF : null;
-    addF("Dividende <= Free Cashflow", "Normal", 1, thresholdAmpel(payoutFCF, 0.6, 1.0),
-      payoutFCF !== null ? `Ausschuettungsquote vs. FCF ${(payoutFCF * 100).toFixed(0)}%.` : "Nicht berechenbar.");
+    addF("Dividende <= Free Cashflow", "Normal", 1, ...ausschuettungsAmpel(lastDiv, lastFCF, "FCF", "negativem FCF"));
   }
 
   const fundamentalPflicht = kriterienFundamental.filter((k) => !k.optional).map((k) => ({ a: k.a, w: k.w }));
