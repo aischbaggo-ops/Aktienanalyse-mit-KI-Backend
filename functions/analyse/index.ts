@@ -13,6 +13,7 @@ import { buildDataFlags, fmpAuthErrorExcludingNews, llmRecoveredFrom } from "../
 import { resolveRegion } from "../_shared/region.ts";
 import { trend3ChartBlock, SCORE_INCOMPLETE_CODE, NICHT_BEWERTBAR_PUBLIC } from "../_shared/trend3.ts";
 import { fetchNews } from "../_shared/news.ts";
+import { sucheNachrichten, type WebNewsResult } from "../_shared/llm/claudeWebNews.ts";
 import { logFunctionError } from "../_shared/logFunctionError.ts";
 import { checkUserRateLimit } from "../_shared/rateLimit.ts";
 import { completionPatch, failurePatch, hasValidAnalysis, isCacheFresh, isRunActive, runNotActiveFilter, startPatch } from "../_shared/analysisRun.ts";
@@ -190,6 +191,51 @@ async function ladeIndizes(ticker: string): Promise<string[]> {
   return (data ?? []).map((r: { index_id: string }) => r.index_id);
 }
 
+// Nachrichten-Rueckgriff (24.10.2026): FMP fuehrt Nachrichten nur unter
+// US-Kuerzeln, fuer SAP.DE & Co. bleibt news/stock leer. Ohne Nachrichten
+// ist die K.O.-Pruefung (Skandale, Vorwuerfe gegen Management) blind - bei
+// den 87 DAX/MDAX-Werten standen diese Kriterien zu 67-74 % auf grau.
+// Dann sucht Claude selbst (llm/claudeWebNews.ts).
+// Nur bei "empty": bei Stoerung oder Planfehler waere eine Suche kein
+// Ersatz, sondern ein Verdecken. Nur mit Claude als Anbieter - die
+// Websuche ist ein Werkzeug der Anthropic-API. Aendert fmpData an Ort und
+// Stelle, damit alles danach die Treffer sieht.
+async function nachrichtenRueckgriff(
+  ticker: string,
+  fmpData: Awaited<ReturnType<typeof fetchFmpData>>,
+  provider: LlmProvider,
+  apiKey: string,
+  model: string | null,
+): Promise<WebNewsResult | null> {
+  if (fmpData.newsStatus !== "empty" || provider !== "claude") return null;
+  const p = first(fmpData.profile) as { companyName?: string; country?: string } | null;
+  const firma = p?.companyName?.trim();
+  if (!firma) return null;
+
+  const start = Date.now();
+  const r = await sucheNachrichten({ apiKey, model, ticker, firma, land: p?.country ?? null });
+  await logApiCall({
+    functionName: "analyse",
+    provider: "claude",
+    callType: "nachrichten-websuche",
+    ticker,
+    success: r.status !== "error",
+    durationMs: Date.now() - start,
+    tokensInput: r.tokensInput,
+    tokensOutput: r.tokensOutput,
+    costUsd: r.costUsd,
+    errorMessage: r.fehler ?? `suchen=${r.suchen}; meldungen=${r.items.length}`,
+    stopReason: r.stopReason,
+    model: r.model,
+  });
+  if (r.items.length > 0) {
+    fmpData.news = { ok: true, data: r.items };
+    fmpData.newsStatus = "ok";
+    fmpData.newsSource = "claude_websearch";
+  }
+  return r;
+}
+
 async function fetchFmpData(ticker: string, fmpKey: string) {
   // Aktiengattungen (BRK.B / BRK-B): FMP kennt je nach Endpunkt nur eine
   // Schreibweise. Nur bei solchen Tickern ein Vorab-Profilaufruf; gespeichert
@@ -295,6 +341,9 @@ async function runAnalysis(
     // nicht" (siehe _shared/fmpStatus.ts).
     const noProfile = profileAbort(fmpData.profile);
     if (noProfile) throw noProfile;
+    // Muss VOR computeScores laufen: dort werden die Nachrichten gezaehlt
+    // und fuer den Prompt zusammengefasst.
+    const webNews = await nachrichtenRueckgriff(ticker, fmpData, provider, llmApiKey, llmModel);
     const scoreData = computeScores(fmpData, fmpData.region);
     if (!scoreData.profile) throw profileAbort({ ok: true, data: [] })!;
 
@@ -453,7 +502,11 @@ async function runAnalysis(
       console.error("[analyse] anomaly logging failed (ignored):", (e as Error).message);
     }
     let warnings = [...scoreData.warningsNumerisch, ...parsed.warnings];
-    let tokensInput = parsed.tokensInput, tokensOutput = parsed.tokensOutput, costUsd = parsed.costUsd;
+    // Die Websuche gehoert zu den Kosten dieser Analyse - ohne sie
+    // unterschaetzte stock_analyses_costs jede deutsche Analyse.
+    let tokensInput = parsed.tokensInput + (webNews?.tokensInput ?? 0);
+    let tokensOutput = parsed.tokensOutput + (webNews?.tokensOutput ?? 0);
+    let costUsd = parsed.costUsd + (webNews?.costUsd ?? 0);
 
     const ipoDate = scoreData.profile?.ipoDate;
     if (ipoDate) {
