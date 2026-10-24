@@ -7,7 +7,7 @@ import type { LlmToolResult } from "./types.ts";
 // 20260924100000). Bewusst weiterhin "claude-sonnet-5", NICHT auf ein
 // anderes Modell umgestellt - "Bestandsverhalten nicht brechen" war
 // explizite Vorgabe fuer dieses Feature.
-const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
+export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 
 // Ruft die echte Anthropic Messages API direkt per fetch auf (kein SDK-
 // Import noetig, funktioniert zuverlaessig in Deno) - identisch zur

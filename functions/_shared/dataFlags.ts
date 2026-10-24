@@ -10,7 +10,9 @@ export const BENCHMARK_SYMBOL = "^GSPC";
 export type NewsStatus = "ok" | "blocked" | "error" | "empty";
 
 // Herkunft der News eines Laufs (siehe news.ts). Neue Quellen hier ergaenzen.
-export type NewsSource = "fmp";
+// "claude_websearch": Rueckgriff, wenn FMP leer bleibt (deutsche Werte,
+// siehe llm/claudeWebNews.ts).
+export type NewsSource = "fmp" | "claude_websearch";
 
 // Form des Ergebnisses von fmpGet() (analyse/index.ts).
 export interface FmpResultLike {
