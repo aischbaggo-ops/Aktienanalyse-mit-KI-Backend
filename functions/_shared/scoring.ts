@@ -69,6 +69,33 @@ export function dividendeAusCashflow(c: any): number | null {
   return null;
 }
 
+// "Dividende stetig, keine Ausfaelle": Ausfaelle zaehlen erst AB dem ersten
+// Jahr mit Dividende. Entscheidung Michael vom 25.10.2026 - vorher galt jedes
+// dividendenlose Jahr im Fenster als Ausfall, und META, Alphabet, Booking,
+// Salesforce oder T-Mobile wurden rot, WEIL sie 2023/24 mit Dividenden
+// angefangen haben. Getroffen werden jetzt nur Kuerzungen und Aussetzungen
+// (Boeing, TUI, Commerzbank). Eingaben in zeitlicher Reihenfolge, aelteste
+// zuerst; daten sind die Abschlussdaten der Cashflow-Rechnung.
+export function dividendenStetigkeit(
+  dividenden: (number | null)[], daten: (string | null)[],
+): { a: number; begruendung: string } {
+  const fenster = dividenden.slice(-20);
+  const datenFenster = daten.slice(-20);
+  const erstes = fenster.findIndex((x) => !!x && x > 0);
+  const seitBeginn = erstes < 0 ? [] : fenster.slice(erstes);
+  const gaps = seitBeginn.filter((x) => !x || x === 0).length;
+  const a = gaps === 0 ? 1 : gaps <= 1 ? 0.5 : 0;
+  if (erstes > 0) {
+    const jahr = datenFenster[erstes]?.slice(0, 4) ?? "?";
+    return {
+      a,
+      begruendung: `${gaps} Jahr(e) ohne Dividende seit der ersten Ausschuettung ${jahr}; ` +
+        `die Jahre davor zaehlen nicht als Ausfall.`,
+    };
+  }
+  return { a, begruendung: `${gaps} Jahr(e) ohne Dividende in den letzten ${fenster.length} verfuegbaren Jahren.` };
+}
+
 // Ausschuettungsquote Dividende / Basis (Gewinn oder FCF) als Ampel samt
 // Begruendung. Eine Dividende bei Verlust oder negativem FCF ist ROT:
 // thresholdAmpel() wuerde die dann negative Quote als "<= 60 %" werten und
@@ -233,10 +260,8 @@ export function computeScores(d: any, region: RegionConfig = REGION_STANDARD) {
   const dividendsPaid = cashflowRaw.map(dividendeAusCashflow);
   const isDividendPayer = dividendsPaid.some((x: number | null) => x && x > 0);
   if (isDividendPayer) {
-    const last20 = dividendsPaid.slice(-20);
-    const gaps = last20.filter((x: number | null) => !x || x === 0).length;
-    addF("Dividende stetig, keine Ausfaelle", "Normal", 1, gaps === 0 ? 1 : gaps <= 1 ? 0.5 : 0,
-      `${gaps} Jahr(e) ohne Dividende in den letzten ${last20.length} verfuegbaren Jahren.`);
+    const stetig = dividendenStetigkeit(dividendsPaid, cashflowRaw.map((c: any) => c?.date ?? null));
+    addF("Dividende stetig, keine Ausfaelle", "Normal", 1, stetig.a, stetig.begruendung);
 
     const lastNI = netIncome.slice(-1)[0];
     const lastDiv = dividendsPaid.slice(-1)[0];

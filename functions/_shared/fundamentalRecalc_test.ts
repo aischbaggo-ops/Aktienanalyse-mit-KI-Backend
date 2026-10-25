@@ -1,6 +1,6 @@
 // Aufruf (aus dem Repo-Root): deno test functions/_shared/fundamentalRecalc_test.ts
 // Rein lokal, ohne Netz und ohne DB. Synthetische Abschluesse.
-import { ausschuettungsAmpel, dividendeAusCashflow } from "./scoring.ts";
+import { ausschuettungsAmpel, dividendeAusCashflow, dividendenStetigkeit } from "./scoring.ts";
 import {
   aendertSich, gesamtNeu, kriterienErsetzen, ohneDividendenfelder, rechneFundamental, type Abschluesse,
 } from "./fundamentalRecalc.ts";
@@ -111,6 +111,41 @@ Deno.test("Verlustjahr mit Dividende (Fall Smucker): Dividende <= Gewinn rot", (
   const r = rechneFundamental(abschluesse({ gewinn: (i) => (i === 4 ? -139 : 700) }));
   const k = r.kriterien.find((x) => x.name === "Dividende <= Gewinn")!;
   assert(k.ampel === "rot" && k.begruendung === "Dividende trotz Verlust.", `${k.ampel}: ${k.begruendung}`);
+});
+
+// --- Dividende stetig: Ausfaelle erst ab der ersten Ausschuettung -------------------
+// Entscheidung Michael vom 25.10.2026.
+
+const D = ["2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31"];
+
+Deno.test("Neubeginn ist kein Ausfall (Fall Alphabet, META): gruen", () => {
+  // Dividende erst seit 2024 - vorher waren das drei Ausfaelle, also rot.
+  const r = dividendenStetigkeit([null, 0, 0, 500, 600], D);
+  assert(r.a === 1, `gruen, war ${r.a}`);
+  assert(r.begruendung === "0 Jahr(e) ohne Dividende seit der ersten Ausschuettung 2024; die Jahre davor zaehlen nicht als Ausfall.",
+    r.begruendung);
+});
+
+Deno.test("Aussetzen nach Beginn bleibt ein Ausfall (Fall Boeing, TUI)", () => {
+  const zwei = dividendenStetigkeit([400, 0, 0, 300, 350], D);
+  assert(zwei.a === 0, `zwei Ausfaelle rot, war ${zwei.a}`);
+  const einer = dividendenStetigkeit([400, 410, 0, 300, 350], D);
+  assert(einer.a === 0.5, `ein Ausfall gelb, war ${einer.a}`);
+  // Zahlte und hoerte auf: die Jahre NACH dem Ende zaehlen.
+  const ende = dividendenStetigkeit([400, 0, 0, 0, 0], D);
+  assert(ende.a === 0 && ende.begruendung.startsWith("4 Jahr(e) ohne Dividende in den letzten 5"), ende.begruendung);
+});
+
+Deno.test("Durchgehende Dividende: gruen, Begruendung wie bisher", () => {
+  const r = dividendenStetigkeit([400, 410, 420, 430, 440], D);
+  assert(r.a === 1, "gruen");
+  assert(r.begruendung === "0 Jahr(e) ohne Dividende in den letzten 5 verfuegbaren Jahren.", r.begruendung);
+});
+
+Deno.test("Neubeginn kommt in der Gesamtrechnung an", () => {
+  const r = rechneFundamental(abschluesse({ dividende: (i) => (i < 3 ? null : -500) }));
+  const k = r.kriterien.find((x) => x.name === "Dividende stetig, keine Ausfaelle")!;
+  assert(k.ampel === "gruen" && String(k.begruendung).includes("seit der ersten Ausschuettung 2024"), `${k.ampel}: ${k.begruendung}`);
 });
 
 // --- Zeile zusammensetzen -----------------------------------------------------------
