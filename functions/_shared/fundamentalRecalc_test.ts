@@ -1,6 +1,6 @@
 // Aufruf (aus dem Repo-Root): deno test functions/_shared/fundamentalRecalc_test.ts
 // Rein lokal, ohne Netz und ohne DB. Synthetische Abschluesse.
-import { ausschuettungsAmpel, dividendeAusCashflow, dividendenStetigkeit } from "./scoring.ts";
+import { ausschuettungsAmpel, dividendeAusCashflow, dividendenStetigkeit, wesentlicheDividende } from "./scoring.ts";
 import {
   aendertSich, gesamtNeu, kriterienErsetzen, ohneDividendenfelder, rechneFundamental, type Abschluesse,
 } from "./fundamentalRecalc.ts";
@@ -18,6 +18,9 @@ function abschluesse(opts: {
   gewinn?: (i: number) => number;
   fcf?: (i: number) => number;
   feld?: string;
+  // Zusaetzliche Felder je Cashflow-Zeile, z. B. alle drei Dividendenfelder
+  // mit den echten FMP-Werten. Dann dividende: () => null setzen.
+  cfExtra?: (i: number) => Record<string, number>;
 } = {}): Abschluesse {
   const dividende = opts.dividende ?? (() => -400);
   const gewinn = opts.gewinn ?? ((i) => 1000 + 100 * i);
@@ -39,6 +42,7 @@ function abschluesse(opts: {
       return {
         date: datum(j), freeCashFlow: fcf(i), operatingCashFlow: fcf(i) + 400,
         ...(d === null ? {} : { [feld]: d }),
+        ...(opts.cfExtra ? opts.cfExtra(i) : {}),
       };
     }) },
     estimates: { ok: true, data: [] },
@@ -111,6 +115,82 @@ Deno.test("Verlustjahr mit Dividende (Fall Smucker): Dividende <= Gewinn rot", (
   const r = rechneFundamental(abschluesse({ gewinn: (i) => (i === 4 ? -139 : 700) }));
   const k = r.kriterien.find((x) => x.name === "Dividende <= Gewinn")!;
   assert(k.ampel === "rot" && k.begruendung === "Dividende trotz Verlust.", `${k.ampel}: ${k.begruendung}`);
+});
+
+// --- Stammdividende und Wesentlichkeit -----------------------------------------------
+// Realty Income, Arch Capital, Generac, Bloom Energy, Delivery Hero und
+// Coca-Cola mit den echten FMP-Werten vom 25.10.2026
+// (claude/fmp_europa_test_zusatz_20261025_142003.json, Mio. USD/EUR).
+// "Nvidia-artig" und "Bayer-artig" sind gerundete Beispielwerte, keine FMP-Daten.
+
+Deno.test("Realty Income: common 0, Betrag nur in net -> net minus preferred", () => {
+  assert(dividendeAusCashflow({ commonDividendsPaid: 0, netDividendsPaid: -2699.5, preferredDividendsPaid: 0 }) === 2699.5,
+    "Stammdividende aus net");
+  assert(dividendeAusCashflow({ commonDividendsPaid: -2920.9, netDividendsPaid: -2920.9, preferredDividendsPaid: 0 }) === 2920.9,
+    "common gefuellt: common");
+});
+
+Deno.test("Arch Capital: net ist reine Vorzugsdividende -> keine Stammdividende", () => {
+  assert(dividendeAusCashflow({ commonDividendsPaid: 0, netDividendsPaid: -47, preferredDividendsPaid: -47 }) === 0,
+    "nur Vorzug");
+  assert(dividendeAusCashflow({ commonDividendsPaid: -1866, netDividendsPaid: -1906, preferredDividendsPaid: -40 }) === 1866,
+    "Sonderdividende 2024");
+  assert(dividendeAusCashflow({ commonDividendsPaid: 0 }) === 0, "nur common = 0: keine Dividende");
+});
+
+Deno.test("Wesentlichkeit: Kleinstbetraege zaehlen nicht, Symboldividende schon", () => {
+  assert(wesentlicheDividende(0.3, 161.4, 4300) === 0, "Generac 0,2 % des Gewinns");
+  assert(wesentlicheDividende(980, 72880, 130500) === 980, "Nvidia-artig 1,3 % des Gewinns");
+  assert(wesentlicheDividende(54, -698.2, 12800) === 0, "Delivery Hero: Verlust, 0,4 % des Umsatzes");
+  assert(wesentlicheDividende(1.5, -27.2, 1470) === 0, "Bloom Energy");
+  assert(wesentlicheDividende(2360, -2950, 47600) === 2360, "Verlustjahr mit echter Dividende (Bayer-artig): 5 % des Umsatzes");
+  assert(wesentlicheDividende(8779, 13137, 47000) === 8779, "Coca-Cola");
+  assert(wesentlicheDividende(50, null, null) === 50, "ohne Bezugsgroesse unveraendert");
+  assert(wesentlicheDividende(null, 100, 1000) === null && wesentlicheDividende(0, 100, 1000) === 0, "keine Dividende bleibt");
+});
+
+Deno.test("Gesamtrechnung Realty Income: alle fuenf Jahre Dividende, stetig gruen", () => {
+  const net = [-1169.0, -1813.4, -2111.8, -2699.5, -2920.9];
+  const r = rechneFundamental(abschluesse({
+    dividende: () => null,
+    cfExtra: (i) => ({ commonDividendsPaid: i < 4 ? 0 : net[i], netDividendsPaid: net[i], preferredDividendsPaid: 0 }),
+    gewinn: (i) => [360.7, 872.4, 872.3, 867.3, 1069.8][i],
+  }));
+  const k = r.kriterien.find((x) => x.name === "Dividende stetig, keine Ausfaelle")!;
+  assert(r.dividendenzahler && k.ampel === "gruen", `${k.ampel}: ${k.begruendung}`);
+});
+
+Deno.test("Gesamtrechnung Generac: kein Dividendenzahler", () => {
+  const r = rechneFundamental(abschluesse({
+    dividende: () => null,
+    cfExtra: (i) => ({ commonDividendsPaid: [0, -0.3, 0, -0.3, -0.3][i], netDividendsPaid: [0, -0.3, 0, -0.3, -0.3][i], preferredDividendsPaid: 0 }),
+    gewinn: (i) => [556.6, 408.9, 217.1, 317.0, 161.4][i],
+  }));
+  assert(!r.dividendenzahler && !namen(r.kriterien).some((n) => DIV.includes(n)), "keine Dividendenkriterien");
+});
+
+Deno.test("Gesamtrechnung Delivery Hero: Verluste, Kleinstbetraege - kein Zahler", () => {
+  const r = rechneFundamental(abschluesse({
+    dividende: () => null,
+    cfExtra: (i) => ({ commonDividendsPaid: [0, 0, -3.3, 0, -54][i], netDividendsPaid: [0, 0, -3.3, 0, -54][i], preferredDividendsPaid: 0 }),
+    gewinn: (i) => [-1096.5, -2975.1, -2297.5, -882.4, -698.2][i],
+  }));
+  assert(!r.dividendenzahler, "kein Zahler");
+});
+
+Deno.test("Gesamtrechnung Arch Capital: nur die Sonderdividende 2024 zaehlt", () => {
+  const r = rechneFundamental(abschluesse({
+    dividende: () => null,
+    cfExtra: (i) => ({
+      commonDividendsPaid: [0, 0, 0, -1866, -7][i], netDividendsPaid: [-47, -40, -40, -1906, -47][i],
+      preferredDividendsPaid: [-47, -40, -40, -40, -40][i],
+    }),
+    gewinn: (i) => [2239.5, 1482.4, 4442, 4312, 4399][i],
+  }));
+  const k = r.kriterien.find((x) => x.name === "Dividende stetig, keine Ausfaelle")!;
+  // 2024 erste Stammdividende, 2025 nur 7 Mio. (0,16 % des Gewinns): ein Ausfall seit Beginn.
+  assert(r.dividendenzahler && k.ampel === "gelb", `${k.ampel}: ${k.begruendung}`);
+  assert(String(k.begruendung).includes("seit der ersten Ausschuettung 2024"), String(k.begruendung));
 });
 
 // --- Dividende stetig: Ausfaelle erst ab der ersten Ausschuettung -------------------

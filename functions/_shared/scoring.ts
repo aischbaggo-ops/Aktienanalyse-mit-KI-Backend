@@ -52,21 +52,54 @@ function thresholdAmpelInverse(value: number | null, greenIfAbove: number, yello
   if (value >= yellowIfAbove) return 0.5;
   return 0;
 }
-// Ausgeschuettete Dividende eines Geschaeftsjahres (Cashflow-Rechnung), als
-// positiver Betrag. Die stable-API von FMP fuehrt das Feld als
-// commonDividendsPaid (Stammaktien) bzw. netDividendsPaid (inkl.
-// Vorzugsaktien); "dividendsPaid" war der Name der alten API und kam seit dem
-// ersten Lauf (07.10.2026) nie an - kein einziger Wert galt als
-// Dividendenzahler, die drei Dividendenkriterien liefen nie (belegt am
-// 24.10.2026, claude/fmp_europa_test_zusatz_20261024_154937.json).
-// Stammaktien zuerst: um deren Dividende geht es in den Kriterien.
-const DIVIDENDEN_FELDER = ["commonDividendsPaid", "netDividendsPaid", "dividendsPaid"] as const;
+// Ausgeschuettete STAMM-Dividende eines Geschaeftsjahres (Cashflow-Rechnung),
+// als positiver Betrag. "dividendsPaid" war der Name der alten FMP-API und kam
+// seit dem ersten Lauf (07.10.2026) nie an - kein Wert galt als
+// Dividendenzahler (belegt 24.10.2026, fmp_europa_test_zusatz_20261024_154937).
+//
+// Die stable-API kennt drei Felder, und die Rohwerte vom 25.10.2026
+// (fmp_europa_test_zusatz_20261025_142003) zeigen, dass keines allein genuegt:
+//  * Realty Income: commonDividendsPaid ist 2021-2024 0, der echte Betrag
+//    steht nur in netDividendsPaid (Vorzugsdividende 0).
+//  * Arch Capital: netDividendsPaid ist dort reine Vorzugsdividende
+//    (preferredDividendsPaid gleich hoch), die Stammaktie bekam nichts.
+// Deshalb: common, wenn es einen Betrag traegt; sonst net minus preferred.
+function zahl(v: unknown): number | null {
+  return typeof v === "number" && !isNaN(v) ? v : null;
+}
 export function dividendeAusCashflow(c: any): number | null {
-  for (const feld of DIVIDENDEN_FELDER) {
-    const v = c?.[feld];
-    if (typeof v === "number" && !isNaN(v)) return Math.abs(v);
+  const common = zahl(c?.commonDividendsPaid);
+  const net = zahl(c?.netDividendsPaid);
+  const pref = zahl(c?.preferredDividendsPaid);
+  if (common !== null && common !== 0) return Math.abs(common);
+  if (net !== null) return Math.max(0, Math.abs(net) - Math.abs(pref ?? 0));
+  if (common !== null) return 0;
+  const alt = zahl(c?.dividendsPaid);
+  return alt === null ? null : Math.abs(alt);
+}
+
+// Ist die Dividende eines Jahres eine echte Ausschuettung an die Aktionaere -
+// oder ein Rest? FMP fuehrt unter commonDividendsPaid auch Kleinstbetraege:
+// Generac 0,3 Mio. bei 160-550 Mio. Gewinn (0,1-0,2 %), Bloom Energy
+// 0,9-1,5 Mio., Delivery Hero 3 und 54 Mio. bei Verlusten in Milliardenhoehe.
+// Keine dieser Firmen zahlt ihren Aktionaeren eine Dividende; vermutlich sind
+// es Zahlungen von Toechtern an Minderheitsaktionaere.
+// Wesentlich ist eine Dividende ab 1 % des Gewinns, bei Verlust ab 1 % des
+// Umsatzes. Bewusst niedrig: Nvidias Symboldividende (rund 1,3 % des Gewinns)
+// zaehlt noch, Generacs 0,1 % nicht. Ohne Gewinn- und Umsatzangabe bleibt der
+// Betrag, wie er ist.
+export const DIVIDENDE_WESENTLICH_ANTEIL = 0.01;
+export function wesentlicheDividende(
+  dividende: number | null, gewinn: number | null | undefined, umsatz: number | null | undefined,
+): number | null {
+  if (!dividende) return dividende;
+  if (typeof gewinn === "number" && gewinn > 0) {
+    return dividende >= DIVIDENDE_WESENTLICH_ANTEIL * gewinn ? dividende : 0;
   }
-  return null;
+  if (typeof umsatz === "number" && umsatz > 0) {
+    return dividende >= DIVIDENDE_WESENTLICH_ANTEIL * umsatz ? dividende : 0;
+  }
+  return dividende;
 }
 
 // "Dividende stetig, keine Ausfaelle": Ausfaelle zaehlen erst AB dem ersten
@@ -257,7 +290,14 @@ export function computeScores(d: any, region: RegionConfig = REGION_STANDARD) {
       gwRatio !== null ? `Goodwill-Anteil ${(gwRatio * 100).toFixed(1)}%.` : "Nicht verfuegbar.");
   }
 
-  const dividendsPaid = cashflowRaw.map(dividendeAusCashflow);
+  // Gewinn und Umsatz je Geschaeftsjahr ueber das Abschlussdatum zuordnen:
+  // GuV und Cashflow-Rechnung sind getrennt sortiert, die Jahre muessen nicht
+  // deckungsgleich sein.
+  const guvNachDatum = new Map(incomeRaw.map((r: any) => [String(r.date), r]));
+  const dividendsPaid = cashflowRaw.map((c: any) => {
+    const guv: any = guvNachDatum.get(String(c?.date));
+    return wesentlicheDividende(dividendeAusCashflow(c), guv?.netIncome, guv?.revenue);
+  });
   const isDividendPayer = dividendsPaid.some((x: number | null) => x && x > 0);
   if (isDividendPayer) {
     const stetig = dividendenStetigkeit(dividendsPaid, cashflowRaw.map((c: any) => c?.date ?? null));
